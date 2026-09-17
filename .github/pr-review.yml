@@ -1,0 +1,61 @@
+name: AI PR Review Gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write        # merge
+  pull-requests: write   # comments, labels
+  statuses: write        # "PR Review Gate" commit status
+  checks: read
+
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  review:
+    # PR events: skip drafts. Comment events: only on PRs, only "carlos ..." commands.
+    if: >
+      (github.event_name != 'issue_comment' && github.event.pull_request.draft == false) ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+       startsWith(github.event.comment.body, 'carlos '))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install anthropic requests
+
+      - name: Run review / gate / command
+        id: review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}   # empty on comment events; script fetches it
+          EVENT_NAME: ${{ github.event_name }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          BOT_NAME: carlos
+          MODEL: claude-sonnet-5
+          # Paths that always require at least one human approver, even at 95%+
+          PROTECTED_PATHS: "auth/,payments/,migrations/,infra/,.github/workflows/"
+        run: python .github/scripts/pr_review.py
+
+      - name: Enable auto-merge (score >= 95, no blockers, unprotected)
+        if: steps.review.outputs.auto_merge == 'true' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr merge ${{ github.event.pull_request.number }} --auto --squash --repo ${{ github.repository }}
