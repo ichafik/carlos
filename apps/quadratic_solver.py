@@ -10,6 +10,25 @@ falls back to a linear solution when a == 0.
 import cmath
 import math
 
+# Largest magnitude accepted for a coefficient. The discriminant squares b and
+# multiplies a*c, so anything above ~1e154 saturates float64 to inf and yields
+# inf/nan roots. 1e150 leaves headroom while covering any realistic input.
+MAX_COEFFICIENT = 1e150
+
+
+def validate_coefficient(value: float, name: str = "coefficient") -> float:
+    """Ensure a coefficient is a finite number within MAX_COEFFICIENT bounds.
+
+    Raises ValueError otherwise. Returns the value unchanged on success.
+    """
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be a finite number, got {value!r}.")
+    if abs(value) > MAX_COEFFICIENT:
+        raise ValueError(
+            f"{name} magnitude too large (|{value:.3g}| > {MAX_COEFFICIENT:.0e})."
+        )
+    return value
+
 
 def discriminant(a: float, b: float, c: float) -> float:
     """Return the discriminant b^2 - 4ac."""
@@ -28,7 +47,12 @@ def solve_quadratic(a: float, b: float, c: float) -> tuple:
     Raises ValueError when a == 0 and b == 0:
       - c == 0 -> infinite solutions
       - c != 0 -> no solution
+    Raises ValueError if any coefficient is non-finite or exceeds MAX_COEFFICIENT.
     """
+    validate_coefficient(a, "Coefficient a")
+    validate_coefficient(b, "Coefficient b")
+    validate_coefficient(c, "Coefficient c")
+
     if a == 0:
         if b == 0:
             if c == 0:
@@ -68,18 +92,20 @@ def format_root(root: float | complex) -> str:
 
 
 def parse_coefficient(raw: str, name: str = "coefficient") -> float:
-    """Convert user text to a finite float.
+    """Convert user text to a bounded, finite float.
 
-    Raises ValueError if the text is not a number or is inf/-inf/nan,
-    since those would produce meaningless results in the solver.
+    Raises ValueError if the text is not a number, is inf/-inf/nan, or its
+    magnitude exceeds MAX_COEFFICIENT, since those would produce meaningless
+    (inf/nan) results in the solver.
     """
+    text = raw.strip()
     try:
-        val = float(raw.strip())
+        val = float(text)
     except ValueError:
-        raise ValueError(f"{name} must be a number, got {raw.strip()!r}.") from None
+        raise ValueError(f"{name} must be a number, got {text!r}.") from None
     if not math.isfinite(val):
-        raise ValueError(f"{name} must be a finite number, got {raw.strip()!r}.")
-    return val
+        raise ValueError(f"{name} must be a finite number, got {text!r}.")
+    return validate_coefficient(val, name)
 
 
 def read_coefficient(name: str) -> float:

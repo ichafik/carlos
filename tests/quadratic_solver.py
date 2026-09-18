@@ -13,6 +13,7 @@ or
     python test/quadratic_solver.py
 """
 
+import math
 import sys
 import unittest
 from pathlib import Path
@@ -23,12 +24,42 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from apps.quadratic_solver import (  # noqa: E402
+    MAX_COEFFICIENT,
     discriminant,
     format_root,
     main,
     parse_coefficient,
     solve_quadratic,
+    validate_coefficient,
 )
+
+
+class TestValidateCoefficient(unittest.TestCase):
+    def test_returns_value_unchanged(self):
+        self.assertEqual(validate_coefficient(2.5), 2.5)
+
+    def test_accepts_zero_and_negatives(self):
+        self.assertEqual(validate_coefficient(0.0), 0.0)
+        self.assertEqual(validate_coefficient(-7.0), -7.0)
+
+    def test_accepts_exact_bound(self):
+        self.assertEqual(validate_coefficient(MAX_COEFFICIENT), MAX_COEFFICIENT)
+        self.assertEqual(validate_coefficient(-MAX_COEFFICIENT), -MAX_COEFFICIENT)
+
+    def test_rejects_above_bound(self):
+        with self.assertRaises(ValueError) as ctx:
+            validate_coefficient(1e151, name="Coefficient b")
+        self.assertIn("too large", str(ctx.exception))
+        self.assertIn("Coefficient b", str(ctx.exception))
+
+    def test_rejects_below_negative_bound(self):
+        with self.assertRaises(ValueError):
+            validate_coefficient(-1e200)
+
+    def test_rejects_non_finite(self):
+        for bad in (float("inf"), float("-inf"), float("nan")):
+            with self.subTest(value=bad), self.assertRaises(ValueError):
+                validate_coefficient(bad)
 
 
 class TestParseCoefficient(unittest.TestCase):
@@ -70,6 +101,17 @@ class TestParseCoefficient(unittest.TestCase):
         # A literal too large for a float parses as inf and must be rejected
         with self.assertRaises(ValueError):
             parse_coefficient("1e999")
+
+    def test_magnitude_above_bound_raises(self):
+        # Finite, but large enough to saturate b*b or 4*a*c to inf
+        for text in ("1e151", "-1e200", "1e308"):
+            with self.subTest(text=text), self.assertRaises(ValueError) as ctx:
+                parse_coefficient(text)
+            self.assertIn("too large", str(ctx.exception))
+
+    def test_magnitude_at_bound_accepted(self):
+        self.assertEqual(parse_coefficient("1e150"), 1e150)
+        self.assertEqual(parse_coefficient("-1e150"), -1e150)
 
 
 class TestDiscriminant(unittest.TestCase):
@@ -141,6 +183,25 @@ class TestSolveQuadratic(unittest.TestCase):
             solve_quadratic(0, 0, 5)
         self.assertIn("No solution", str(ctx.exception))
 
+    def test_huge_coefficients_rejected_not_garbage(self):
+        # Previously these returned (-inf, inf) or nan roots silently
+        for coeffs in [(1, 1e200, 1), (1e200, 1, 1e200), (1, 1, 1e308)]:
+            with self.subTest(coeffs=coeffs), self.assertRaises(ValueError) as ctx:
+                solve_quadratic(*coeffs)
+            self.assertIn("too large", str(ctx.exception))
+
+    def test_non_finite_coefficients_rejected(self):
+        with self.assertRaises(ValueError):
+            solve_quadratic(1, float("inf"), 1)
+        with self.assertRaises(ValueError):
+            solve_quadratic(float("nan"), 1, 1)
+
+    def test_large_but_bounded_coefficients_produce_finite_roots(self):
+        roots = solve_quadratic(1e150, 0, -1e150)  # x^2 = 1
+        self.assertEqual(roots, (-1.0, 1.0))
+        roots = solve_quadratic(1, 1e150, 1)
+        self.assertTrue(all(math.isfinite(r) for r in roots))
+
 
 class TestFormatRoot(unittest.TestCase):
     def test_integer_float(self):
@@ -200,6 +261,13 @@ class TestMain(unittest.TestCase):
     def test_nan_coefficient_rejected(self):
         out = self.run_main(["1", "2", "nan"])
         self.assertIn("Invalid input: Coefficient c must be a finite number, got 'nan'.", out)
+
+    def test_huge_coefficient_rejected(self):
+        out = self.run_main(["1", "1e200", "1"])
+        self.assertTrue(
+            any(line.startswith("Invalid input: Coefficient b magnitude too large") for line in out),
+            out,
+        )
 
     def test_stops_prompting_after_invalid_input(self):
         # After a bad "a", main must not ask for b and c
