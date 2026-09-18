@@ -1,8 +1,8 @@
 """
-Carlos — PR reviewer and merge gatekeeper
+Carlos Code Reviewer — PR reviewer and merge gatekeeper
 
-Named after Roberto Carlos, Brazil's legendary left-back: nothing gets past him
-into main without earning it. Powered by the Gemini API.
+Reviews every pull request with the Gemini API, scores it, and enforces a
+score-based approval policy before anything reaches main.
 
 Modes (derived from the GitHub event)
   pull_request        -> review : ask Gemini, score, post report, publish gate status
@@ -40,7 +40,15 @@ MODEL = os.environ.get("MODEL", "gemini-3.8-flash")
 PROTECTED = [p.strip() for p in os.environ.get("PROTECTED_PATHS", "").split(",") if p.strip()]
 MARKER = "<!-- carlos-pr-review -->"
 STATUS_CONTEXT = os.environ.get("STATUS_CONTEXT", "Carlos Review Gate")
-MAX_DIFF_CHARS = 180_000
+MAX_DIFF_CHARS = int(os.environ.get("MAX_DIFF_CHARS", "500000"))
+WHITEBOOK_PATH = os.environ.get("WHITEBOOK_PATH", ".github/WHITEBOOK.md")   # local override
+WHITEBOOK_REPO = os.environ.get("WHITEBOOK_REPO", "")   # e.g. "my-org/.github" → central source of truth
+WHITEBOOK_REF = os.environ.get("WHITEBOOK_REF", "main")
+MAX_WHITEBOOK_CHARS = 40_000
+SEED = int(os.environ.get("SEED", "42"))                # fixed seed → same diff, same review (best-effort)
+TEMPERATURE = float(os.environ.get("TEMPERATURE", "0"))  # 0 = most deterministic
+SEVERITIES = ("blocker", "major", "minor", "nit")
+SEV_RANK = {sev: n for n, sev in enumerate(SEVERITIES)}
 
 HEADERS = {
     "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
@@ -56,7 +64,7 @@ Score rubric (0-100):
   style / maintainability ........ 15
 """
 
-SYSTEM_PROMPT = f"""You are Carlos, a senior software engineer and the last line of defence before main. Perform a rigorous pull-request review.
+SYSTEM_PROMPT = f"""You are Carlos, a senior software engineer acting as the code reviewer for this repository. Perform a rigorous pull-request review.
 Return ONLY a JSON object (no prose, no markdown fences) with this exact shape:
 
 {{
@@ -66,6 +74,10 @@ Return ONLY a JSON object (no prose, no markdown fences) with this exact shape:
   ],
   "edge_cases": [
     {{"case": "...", "status": "covered|not_covered|not_applicable", "note": "..."}}
+  ],
+  "policy_violations": [
+    {{"rule_id": "WB-SEC-01", "level": "MUST NOT|MUST|SHOULD", "file": "path", "line": 0,
+      "evidence": "what in the diff violates it", "fix": "..."}}
   ],
   "potential_bugs": [
     {{"file": "path", "line": 0, "title": "...", "why": "how this change can break existing behaviour",
@@ -91,6 +103,9 @@ Rules:
   failure paths (timeouts, partial writes, retries), auth/permission boundaries.
 - Set integration_tests_advised=true when the PR touches cross-service boundaries,
   DB schema, external APIs, queues, or configuration.
+- "policy_violations": check the diff against every rule in the ENGINEERING WHITEBOOK section
+  (if present). Report only rules you can point to concrete evidence for in the diff; quote the
+  rule_id exactly. Do not invent rules that are not in the whitebook. Empty list if compliant.
 - "potential_bugs" is for defects this PR INTRODUCES or regressions it risks in existing
   behaviour (changed signatures, altered defaults, removed checks, off-by-one, changed
   error handling, concurrency). Give a concrete trigger for each. Empty list if none.
@@ -99,6 +114,13 @@ Rules:
   ordered by priority. Aim for 3-8; cover every not_covered edge case and every
   potential_bug. Empty list only if the PR is fully and well tested.
 - Be concrete: reference real files and lines from the diff. Do not invent issues.
+- Your training knowledge has a cutoff; the code you review may be newer than it. NEVER report
+  as an issue that a model identifier, library/package version, API name, SDK method, dependency,
+  CLI flag, cloud service, or date "does not exist", "is deprecated", or "is invalid" based on
+  your own knowledge. Treat such identifiers as data you cannot verify. Flag them ONLY if the diff
+  itself contradicts them (e.g. two different values for the same setting, or a call that does not
+  match the imported signature shown in the diff). Do not suggest replacing them with values you
+  know from training.
 - Use the maximum points listed here: {RUBRIC}
 """
 
@@ -121,18 +143,22 @@ def get_pr():
 def user_can_write(login):
     try:
         perm = gh("GET", f"/repos/{REPO}/collaborators/{login}/permission")["permission"]
-    except requests.HTTPError:
+    except requests.RequestException as e:
+        # Fail closed: an unknown permission level is treated as "no access".
+        print(f"[carlos] permission lookup failed for {login}: {e}")
         return False
     return perm in ("write", "maintain", "admin")
 
 
 def react(content):
     """Acknowledge a command comment with an emoji reaction (eyes / rocket / confused)."""
-    if COMMENT_ID:
-        try:
-            gh("POST", f"/repos/{REPO}/issues/comments/{COMMENT_ID}/reactions", json={"content": content})
-        except requests.HTTPError:
-            pass
+    if not COMMENT_ID:
+        return
+    try:
+        gh("POST", f"/repos/{REPO}/issues/comments/{COMMENT_ID}/reactions", json={"content": content})
+    except requests.RequestException as e:
+        # Non-fatal: a missing emoji must not abort a review or merge, but we still want a trace.
+        print(f"[carlos] failed to react '{content}' on comment {COMMENT_ID}: {e}")
 
 
 def reply(text):
@@ -215,6 +241,37 @@ def set_output(key, value):
         f.write(f"{key}={value}\n")
 
 
+# ---------- whitebook ----------
+def load_whitebook():
+    """Central org whitebook (WHITEBOOK_REPO) first, then a local file, else none."""
+    text, source = "", ""
+    if WHITEBOOK_REPO:
+        try:
+            r = requests.get(f"{GH}/repos/{WHITEBOOK_REPO}/contents/{WHITEBOOK_PATH}",
+                             headers={**HEADERS, "Accept": "application/vnd.github.raw+json"},
+                             params={"ref": WHITEBOOK_REF}, timeout=30)
+            if r.ok:
+                text, source = r.text, f"{WHITEBOOK_REPO}@{WHITEBOOK_REF}:{WHITEBOOK_PATH}"
+            else:
+                print(f"[carlos] central whitebook not found ({r.status_code}), trying local")
+        except requests.RequestException as e:
+            print(f"[carlos] central whitebook fetch failed: {e}")
+    if not text and os.path.exists(WHITEBOOK_PATH):
+        with open(WHITEBOOK_PATH, encoding="utf-8") as f:
+            text, source = f.read(), WHITEBOOK_PATH
+    if len(text) > MAX_WHITEBOOK_CHARS:
+        text = text[:MAX_WHITEBOOK_CHARS] + "\n[whitebook truncated]"
+    print(f"[carlos] whitebook: {source or 'none'} ({len(text)} chars)")
+    return text, source
+
+
+def build_system_prompt(whitebook):
+    if not whitebook:
+        return SYSTEM_PROMPT
+    return (SYSTEM_PROMPT + "\n\n=== ENGINEERING WHITEBOOK (organization rules; enforce these) ===\n"
+            + whitebook + "\n=== END WHITEBOOK ===\n")
+
+
 # ---------- model ----------
 def parse_review(text):
     """Best-effort JSON extraction: strip fences, slice to outer braces, repair if needed."""
@@ -229,7 +286,44 @@ def parse_review(text):
         return json.loads(repair_json(text))
 
 
-def ask_model(prompt, attempts=2):
+def normalize_review(review):
+    """Coerce the model output into the shape the rest of the script expects:
+    lower-cased enums, fallbacks for unknown values, lists/dicts always present."""
+    sev_alias = {"critical": "blocker", "high": "major", "medium": "minor", "low": "nit",
+                 "warning": "minor", "info": "nit", "suggestion": "nit"}
+    review.setdefault("summary", "")
+    review["issues"] = review.get("issues") or []
+    for i in review["issues"]:
+        sev = str(i.get("severity", "minor")).strip().lower()
+        i["severity"] = sev_alias.get(sev, sev) if sev_alias.get(sev, sev) in SEVERITIES else "minor"
+        i.setdefault("file", ""); i.setdefault("title", ""); i.setdefault("detail", "")
+    review["potential_bugs"] = review.get("potential_bugs") or []
+    review["policy_violations"] = review.get("policy_violations") or []
+    for v in review["policy_violations"]:
+        lvl = str(v.get("level", "SHOULD")).strip().upper().replace("_", " ")
+        v["level"] = lvl if lvl in ("MUST NOT", "MUST", "SHOULD") else "SHOULD"
+        v.setdefault("rule_id", "?"); v.setdefault("file", ""); v.setdefault("evidence", ""); v.setdefault("fix", "")
+    review["edge_cases"] = review.get("edge_cases") or []
+    for e in review["edge_cases"]:
+        st = str(e.get("status", "not_covered")).strip().lower().replace(" ", "_").replace("-", "_")
+        e["status"] = st if st in ("covered", "not_covered", "not_applicable") else "not_covered"
+        e.setdefault("case", ""); e.setdefault("note", "")
+    t = review["tests"] = review.get("tests") or {}
+    t["suggested_scenarios"] = t.get("suggested_scenarios") or []
+    for sc in t["suggested_scenarios"]:
+        sc["priority"] = str(sc.get("priority", "medium")).strip().lower()
+    sc_ = review["scores"] = review.get("scores") or {}
+    for k in ("correctness", "tests", "security", "style"):
+        try:
+            sc_[k] = max(0, int(float(sc_.get(k, 0))))
+        except (TypeError, ValueError):
+            sc_[k] = 0
+    review["confidence"] = str(review.get("confidence", "medium")).strip().lower()
+    review.setdefault("score_justification", "")
+    return review
+
+
+def ask_model(prompt, system_prompt=SYSTEM_PROMPT, attempts=2):
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     last_err = None
     for attempt in range(1, attempts + 1):
@@ -237,9 +331,12 @@ def ask_model(prompt, attempts=2):
             model=MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
+                system_instruction=system_prompt,
                 response_mime_type="application/json",
-                temperature=0.2,
+                temperature=TEMPERATURE,
+                top_p=1.0,
+                top_k=1,
+                seed=SEED + attempt - 1,   # retry with a different seed so a bad sample isn't repeated
                 max_output_tokens=32768,
             ),
         )
@@ -251,7 +348,7 @@ def ask_model(prompt, attempts=2):
             prompt += "\n\nYour previous answer was cut off. Be more concise: shorter strings, at most 6 items per list."
             continue
         try:
-            return parse_review(text)
+            return normalize_review(parse_review(text))
         except Exception as e:  # noqa: BLE001
             last_err = f"{type(e).__name__}: {e}"
             print(f"[carlos] JSON parse failed: {last_err}\n--- head ---\n{text[:400]}\n--- tail ---\n{text[-400:]}")
@@ -270,6 +367,16 @@ def apply_policy(review, changed_files):
     if blockers:
         score = min(score, 49)
         caps.append(f"{len(blockers)} blocker issue(s) → capped at 49")
+
+    viol = review.get("policy_violations") or []
+    must_not = [v for v in viol if v["level"] == "MUST NOT"]
+    must = [v for v in viol if v["level"] == "MUST"]
+    if must_not:
+        score = min(score, 49)
+        caps.append(f"{len(must_not)} MUST NOT whitebook violation(s) → capped at 49")
+    elif must:
+        score = min(score, 79)
+        caps.append(f"{len(must)} MUST whitebook violation(s) → capped at 79")
 
     bugs = review.get("potential_bugs") or []
     if bugs:
@@ -313,7 +420,7 @@ def render(review, policy, approvals):
     sev_icon = {"blocker": "🟥", "major": "🟧", "minor": "🟨", "nit": "⬜"}
     st_icon = {"covered": "✅", "not_covered": "❌", "not_applicable": "➖"}
     L = [MARKER, f"<!-- score:{policy['score']} required:{policy['required']} auto:{policy['auto_merge']} -->",
-         f"## ⚽ Carlos reviewed this PR — Score **{policy['score']}%**", ""]
+         f"## 🔍 Carlos Code Review — Score **{policy['score']}%**", ""]
 
     if policy["required"] == 0 and policy["auto_merge"]:
         L.append("✅ **Eligible for auto-merge** (≥95%, no blockers, no protected paths).")
@@ -331,14 +438,31 @@ def render(review, policy, approvals):
 
     L.append("### Potential issues")
     if review["issues"]:
-        for i in sorted(review["issues"], key=lambda x: ["blocker", "major", "minor", "nit"].index(x["severity"])):
+        for i in sorted(review["issues"], key=lambda x: SEV_RANK.get(x.get("severity"), 99)):
             loc = f"`{i['file']}`" + (f":{i['line']}" if i.get("line") else "")
-            L.append(f"- {sev_icon.get(i['severity'],'')} **{i['severity'].upper()}** — {i['title']} ({loc})  ")
+            L.append(f"- {sev_icon.get(i['severity'],'⬜')} **{i['severity'].upper()}** — {i['title']} ({loc})  ")
             L.append(f"  {i['detail']}")
             if i.get("suggestion"):
                 L.append(f"  _Suggestion:_ {i['suggestion']}")
     else:
         L.append("None found.")
+    L.append("")
+
+    viol = review.get("policy_violations") or []
+    lvl_icon = {"MUST NOT": "🟥", "MUST": "🟧", "SHOULD": "🟨"}
+    L.append("### Whitebook compliance")
+    if not review.get("_whitebook_source"):
+        L.append("No whitebook configured.")
+    elif viol:
+        order = {"MUST NOT": 0, "MUST": 1, "SHOULD": 2}
+        for v in sorted(viol, key=lambda x: order.get(x["level"], 9)):
+            loc = f"`{v['file']}`" + (f":{v['line']}" if v.get("line") else "")
+            L.append(f"- {lvl_icon.get(v['level'],'')} **{v['rule_id']}** ({v['level']}) — {v['evidence']} ({loc})  ")
+            if v.get("fix"):
+                L.append(f"  _Fix:_ {v['fix']}")
+        L.append(f"\n<sub>Rules from `{review['_whitebook_source']}`</sub>")
+    else:
+        L.append(f"✅ Compliant with `{review['_whitebook_source']}`.")
     L.append("")
 
     bugs = review.get("potential_bugs") or []
@@ -390,7 +514,7 @@ def render(review, policy, approvals):
     L.append(f"\n_{review.get('score_justification','')}_")
     L.append("\n<sub>Policy: ≥95 auto-merge · 50–94 one approver · <50 two approvers. "
              f"Commands: `{BOT_NAME} review` · `{BOT_NAME} merge`. "
-             "Carlos guards main the way Roberto Carlos guarded Brazil's left flank.</sub>")
+             "Carlos Code Reviewer · powered by Gemini.</sub>")
     return "\n".join(L)
 
 
@@ -415,11 +539,15 @@ def run_review():
         diff = diff[:MAX_DIFF_CHARS] + "\n\n[diff truncated]"
     changed = get_changed_files()
 
+    # Keep the prompt byte-identical for an identical diff so the seed can do its job:
+    # sorted file list, no timestamps / run ids / PR numbers.
     prompt = (
         f"PR title: {pr['title']}\n\nPR description:\n{pr.get('body') or '(none)'}\n\n"
-        f"Changed files:\n" + "\n".join(changed) + f"\n\nDiff:\n{diff}"
+        f"Changed files:\n" + "\n".join(sorted(changed)) + f"\n\nDiff:\n{diff}"
     )
-    review = ask_model(prompt)
+    whitebook, wb_source = load_whitebook()
+    review = ask_model(prompt, build_system_prompt(whitebook))
+    review["_whitebook_source"] = wb_source
     if truncated:
         review["confidence"] = "low"
         review["score_justification"] += " (Diff was truncated; confidence lowered.)"
