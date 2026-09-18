@@ -25,13 +25,38 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from apps.quadratic_solver import (  # noqa: E402
     MAX_COEFFICIENT,
+    MAX_INTEGER_DISPLAY,
     discriminant,
     format_root,
+    has_double_root,
     main,
     parse_coefficient,
     solve_quadratic,
     validate_coefficient,
 )
+
+
+class TestHasDoubleRoot(unittest.TestCase):
+    def test_exact_perfect_square(self):
+        self.assertTrue(has_double_root(1, 2, 1))
+
+    def test_perfect_square_with_rounding_noise(self):
+        self.assertTrue(has_double_root(1.0, -1.4, 0.49))
+
+    def test_tiny_perfect_square(self):
+        self.assertTrue(has_double_root(1e-170, -1.4e-170, 0.49e-170))
+
+    def test_distinct_real_roots(self):
+        self.assertFalse(has_double_root(1, -3, 2))
+
+    def test_complex_roots(self):
+        self.assertFalse(has_double_root(1, 0, 1))
+
+    def test_tiny_complex_roots_not_mistaken_for_double(self):
+        self.assertFalse(has_double_root(1e-170, 1e-170, 1e-170))
+
+    def test_subnormal_a_not_double(self):
+        self.assertFalse(has_double_root(5e-324, 1.0, 1.0))
 
 
 class TestValidateCoefficient(unittest.TestCase):
@@ -322,6 +347,68 @@ class TestSolveQuadratic(unittest.TestCase):
         self.assertEqual(solve_quadratic(3, -12, 9), (1.0, 3.0))
         self.assertEqual(solve_quadratic(1, 2, 1), (-1.0,))
 
+    # --- subnormal a with normal b/c ------------------------------------------
+
+    def test_subnormal_a_with_normal_coefficients_does_not_zero_divide(self):
+        # a = 5e-324 (smallest float64), b = c = 1. Previously the power-of-two
+        # down-scaling shifted a to 0.0 -> ZeroDivisionError.
+        # True roots: ~ -1 and ~ -2e323; the latter exceeds float64 range, so
+        # only the representable root is returned.
+        roots = solve_quadratic(5e-324, 1.0, 1.0)
+        self.assertEqual(len(roots), 1)
+        self.assertTrue(math.isfinite(roots[0]))
+        self.assertAlmostEqual(roots[0], -1.0, places=12)
+
+    def test_large_root_beyond_float_range_returns_representable_root(self):
+        # 1e-320 x^2 + x + 1 = 0: roots ~ -1e320 (unrepresentable) and -1.
+        # Previously returned (-inf, -1.0).
+        roots = solve_quadratic(1e-320, 1.0, 1.0)
+        self.assertEqual(roots, (-1.0,))
+        for root in roots:
+            self.assertTrue(math.isfinite(root))
+
+    def test_large_root_just_inside_float_range_is_kept(self):
+        # 1e-300 x^2 + x + 1 = 0: roots ~ -1e300 (representable) and -1
+        roots = solve_quadratic(1e-300, 1.0, 1.0)
+        self.assertEqual(len(roots), 2)
+        self.assertAlmostEqual(roots[0] / -1e300, 1.0, places=12)
+        self.assertAlmostEqual(roots[1], -1.0, places=12)
+
+    def test_subnormal_a_with_zero_b_gives_complex_roots(self):
+        # 5e-324 x^2 + 1 = 0 -> x = ±i/sqrt(5e-324) ~ ±4.5e161 i, representable.
+        # (Compute the expectation as 1/sqrt(a); 1/a itself overflows to inf.)
+        expected = 1 / math.sqrt(5e-324)
+        roots = solve_quadratic(5e-324, 0.0, 1.0)
+        self.assertEqual(len(roots), 2)
+        self.assertTrue(all(isinstance(r, complex) for r in roots))
+        self.assertTrue(all(math.isfinite(r.imag) for r in roots))
+        self.assertAlmostEqual(roots[1].imag / expected, 1.0, places=10)
+        self.assertAlmostEqual(roots[0].imag / expected, -1.0, places=10)
+
+    def test_subnormal_a_with_negative_c_gives_real_roots(self):
+        # 5e-324 x^2 - 1 = 0 -> x = ±1/sqrt(5e-324) ~ ±4.5e161, representable
+        expected = 1 / math.sqrt(5e-324)
+        roots = solve_quadratic(5e-324, 0.0, -1.0)
+        self.assertEqual(len(roots), 2)
+        self.assertAlmostEqual(roots[1] / expected, 1.0, places=10)
+        self.assertAlmostEqual(roots[0], -roots[1])
+
+    def test_all_returned_roots_are_finite_across_extreme_inputs(self):
+        extremes = [
+            (5e-324, 1.0, 1.0), (5e-324, -1.0, 1.0), (5e-324, 1.0, -1.0),
+            (1e-320, 1e150, 1.0), (5e-324, 5e-324, 1e150), (1e150, 5e-324, 5e-324),
+            (1e-170, 1e150, -1e150), (1.0, 1e150, 1e-300),
+        ]
+        for coeffs in extremes:
+            with self.subTest(coeffs=coeffs):
+                roots = solve_quadratic(*coeffs)
+                self.assertGreaterEqual(len(roots), 1)
+                for root in roots:
+                    if isinstance(root, complex):
+                        self.assertTrue(math.isfinite(root.real) and math.isfinite(root.imag), root)
+                    else:
+                        self.assertTrue(math.isfinite(root), root)
+
     def test_mixed_tiny_and_normal_coefficients(self):
         # 1e-170 x^2 + x + 1 = 0: roots ~ -1e170 and -1; b*b does not underflow
         # here, but the tiny 4ac must not be mishandled either.
@@ -354,6 +441,24 @@ class TestFormatRoot(unittest.TestCase):
 
     def test_pure_imaginary(self):
         self.assertEqual(format_root(complex(0, 1)), "0 + 1i")
+
+    def test_format_root_large_magnitude_uses_scientific_notation(self):
+        # Integer-valued floats above MAX_INTEGER_DISPLAY must not become
+        # 100+ character digit strings.
+        self.assertEqual(format_root(1e150), "1e+150")
+        self.assertEqual(format_root(-1e150), "-1e+150")
+        self.assertEqual(format_root(1e20), "1e+20")
+        self.assertLess(len(format_root(1e150)), 12)
+
+    def test_format_root_integer_below_threshold_stays_plain(self):
+        self.assertEqual(format_root(123456789.0), "123456789")
+        self.assertEqual(format_root(999999999999999.0), "999999999999999")  # < 1e15
+
+    def test_format_root_threshold_boundary(self):
+        self.assertEqual(format_root(MAX_INTEGER_DISPLAY), "1e+15")
+
+    def test_format_root_large_complex(self):
+        self.assertEqual(format_root(complex(0, 1e161)), "0 + 1e+161i")
 
 
 class TestMain(unittest.TestCase):
@@ -411,6 +516,40 @@ class TestMain(unittest.TestCase):
             any(line.startswith("Invalid input: Coefficient b magnitude too large") for line in out),
             out,
         )
+
+    def test_main_eof_exits_gracefully(self):
+        # Ctrl-D / closed stdin on a prompt must not produce a traceback
+        with patch("builtins.input", side_effect=EOFError), patch("builtins.print") as mock_print:
+            result = main()  # must not raise
+        out = [call.args[0] for call in mock_print.call_args_list]
+        self.assertIsNone(result)
+        self.assertIn("\nAborted.", out)
+
+    def test_main_eof_on_later_prompt_exits_gracefully(self):
+        with patch("builtins.input", side_effect=["1", "2", EOFError]), \
+             patch("builtins.print") as mock_print:
+            main()
+        out = [call.args[0] for call in mock_print.call_args_list]
+        self.assertIn("\nAborted.", out)
+
+    def test_main_keyboard_interrupt_exits_gracefully(self):
+        with patch("builtins.input", side_effect=KeyboardInterrupt), \
+             patch("builtins.print") as mock_print:
+            main()  # must not raise
+        out = [call.args[0] for call in mock_print.call_args_list]
+        self.assertIn("\nAborted.", out)
+
+    def test_main_single_representable_root_is_not_reported_as_double(self):
+        out = self.run_main(["5e-324", "1", "1"])
+        self.assertTrue(
+            any(line.startswith("One representable real root: x = -1 ") for line in out), out
+        )
+        self.assertFalse(any("double" in line for line in out), out)
+
+    def test_main_large_roots_use_scientific_notation(self):
+        # 1e-300 x^2 + x + 1 = 0 -> x1 ~ -1e300, x2 = -1
+        out = self.run_main(["1e-300", "1", "1"])
+        self.assertTrue(any("x1 = -1e+300, x2 = -1" in line for line in out), out)
 
     def test_stops_prompting_after_invalid_input(self):
         # After a bad "a", main must not ask for b and c
