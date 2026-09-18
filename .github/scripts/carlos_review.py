@@ -361,7 +361,6 @@ def publish_gate(score, required, approvals, auto_merge):
     set_output("auto_merge", "true" if auto_merge else "false")
 
 
-# ---------- main ----------
 def run_review():
     set_status("pending", "Carlos is reviewing…")
     pr = get_pr()
