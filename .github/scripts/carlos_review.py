@@ -41,6 +41,8 @@ PROTECTED = [p.strip() for p in os.environ.get("PROTECTED_PATHS", "").split(",")
 MARKER = "<!-- carlos-pr-review -->"
 STATUS_CONTEXT = os.environ.get("STATUS_CONTEXT", "Carlos Review Gate")
 MAX_DIFF_CHARS = 180_000
+SEVERITIES = ("blocker", "major", "minor", "nit")
+SEV_RANK = {sev: n for n, sev in enumerate(SEVERITIES)}
 
 HEADERS = {
     "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
@@ -229,6 +231,38 @@ def parse_review(text):
         return json.loads(repair_json(text))
 
 
+def normalize_review(review):
+    """Coerce the model output into the shape the rest of the script expects:
+    lower-cased enums, fallbacks for unknown values, lists/dicts always present."""
+    sev_alias = {"critical": "blocker", "high": "major", "medium": "minor", "low": "nit",
+                 "warning": "minor", "info": "nit", "suggestion": "nit"}
+    review.setdefault("summary", "")
+    review["issues"] = review.get("issues") or []
+    for i in review["issues"]:
+        sev = str(i.get("severity", "minor")).strip().lower()
+        i["severity"] = sev_alias.get(sev, sev) if sev_alias.get(sev, sev) in SEVERITIES else "minor"
+        i.setdefault("file", ""); i.setdefault("title", ""); i.setdefault("detail", "")
+    review["potential_bugs"] = review.get("potential_bugs") or []
+    review["edge_cases"] = review.get("edge_cases") or []
+    for e in review["edge_cases"]:
+        st = str(e.get("status", "not_covered")).strip().lower().replace(" ", "_").replace("-", "_")
+        e["status"] = st if st in ("covered", "not_covered", "not_applicable") else "not_covered"
+        e.setdefault("case", ""); e.setdefault("note", "")
+    t = review["tests"] = review.get("tests") or {}
+    t["suggested_scenarios"] = t.get("suggested_scenarios") or []
+    for sc in t["suggested_scenarios"]:
+        sc["priority"] = str(sc.get("priority", "medium")).strip().lower()
+    sc_ = review["scores"] = review.get("scores") or {}
+    for k in ("correctness", "tests", "security", "style"):
+        try:
+            sc_[k] = max(0, int(float(sc_.get(k, 0))))
+        except (TypeError, ValueError):
+            sc_[k] = 0
+    review["confidence"] = str(review.get("confidence", "medium")).strip().lower()
+    review.setdefault("score_justification", "")
+    return review
+
+
 def ask_model(prompt, attempts=2):
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     last_err = None
@@ -251,7 +285,7 @@ def ask_model(prompt, attempts=2):
             prompt += "\n\nYour previous answer was cut off. Be more concise: shorter strings, at most 6 items per list."
             continue
         try:
-            return parse_review(text)
+            return normalize_review(parse_review(text))
         except Exception as e:  # noqa: BLE001
             last_err = f"{type(e).__name__}: {e}"
             print(f"[carlos] JSON parse failed: {last_err}\n--- head ---\n{text[:400]}\n--- tail ---\n{text[-400:]}")
@@ -331,9 +365,9 @@ def render(review, policy, approvals):
 
     L.append("### Potential issues")
     if review["issues"]:
-        for i in sorted(review["issues"], key=lambda x: ["blocker", "major", "minor", "nit"].index(x["severity"])):
+        for i in sorted(review["issues"], key=lambda x: SEV_RANK.get(x.get("severity"), 99)):
             loc = f"`{i['file']}`" + (f":{i['line']}" if i.get("line") else "")
-            L.append(f"- {sev_icon.get(i['severity'],'')} **{i['severity'].upper()}** — {i['title']} ({loc})  ")
+            L.append(f"- {sev_icon.get(i['severity'],'⬜')} **{i['severity'].upper()}** — {i['title']} ({loc})  ")
             L.append(f"  {i['detail']}")
             if i.get("suggestion"):
                 L.append(f"  _Suggestion:_ {i['suggestion']}")
