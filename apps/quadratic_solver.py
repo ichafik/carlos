@@ -15,7 +15,11 @@ import math
 # inf/nan roots. 1e150 leaves headroom while covering any realistic input.
 MAX_COEFFICIENT = 1e150
 # Note: there is deliberately no MIN_COEFFICIENT. Tiny coefficients are handled
-# by normalising inside solve_quadratic (see comment there).
+# by scaling up inside solve_quadratic (see _scale_up).
+
+# Above this magnitude an integer-valued float is shown in scientific notation
+# rather than as a long digit string (1e150 would otherwise print 151 digits).
+MAX_INTEGER_DISPLAY = 1e15
 
 # Relative tolerance for treating b^2 and 4ac as equal (i.e. discriminant == 0).
 # Perfect squares like x^2 - 1.4x + 0.49 give b^2 - 4ac = -2.2e-16 in binary
@@ -41,8 +45,45 @@ def validate_coefficient(value: float, name: str = "coefficient") -> float:
 
 
 def discriminant(a: float, b: float, c: float) -> float:
-    """Return the discriminant b^2 - 4ac."""
+    """Return the discriminant b^2 - 4ac.
+
+    Exported as a convenience for callers. Note that solve_quadratic() does
+    not call this: it needs b^2 and 4ac as separate terms so it can compare
+    them with a relative tolerance (see DISCRIMINANT_REL_TOL), which a single
+    subtracted value cannot support.
+    """
     return b * b - 4 * a * c
+
+
+def _scale_up(a: float, b: float, c: float) -> tuple[float, float, float]:
+    """Scale tiny coefficients up by a power of two so the largest is >= 0.5.
+
+    The roots of a*x^2 + b*x + c = 0 are invariant under multiplying all
+    coefficients by the same non-zero factor, but the products b*b and 4*a*c
+    are not: for |coeffs| < ~1e-160 they underflow to 0.0, which would wrongly
+    look like a zero discriminant.
+
+    Only scales UP, never down. Scaling down is unnecessary (MAX_COEFFICIENT
+    already keeps b*b and 4*a*c finite) and would be harmful: shifting a
+    subnormal `a` right can underflow it to 0.0 and cause ZeroDivisionError.
+    Power-of-two scaling via frexp/ldexp is exact, so ordinary inputs like
+    (1, -3, 2) are returned unchanged and keep producing exact roots.
+    """
+    _, exponent = math.frexp(max(abs(a), abs(b), abs(c)))
+    if exponent >= 0:  # largest coefficient already >= 0.5: nothing to do
+        return a, b, c
+    shift = -exponent
+    return math.ldexp(a, shift), math.ldexp(b, shift), math.ldexp(c, shift)
+
+
+def has_double_root(a: float, b: float, c: float) -> bool:
+    """True if a*x^2 + b*x + c has a single (repeated) real root.
+
+    Uses the same scale-invariant tolerance as solve_quadratic(), so perfect
+    squares whose b^2 - 4ac is only rounding noise are correctly detected.
+    """
+    a, b, c = _scale_up(a, b, c)
+    return math.isclose(b * b, 4 * a * c, rel_tol=DISCRIMINANT_REL_TOL)
 
 
 def solve_quadratic(a: float, b: float, c: float) -> tuple:
@@ -53,6 +94,11 @@ def solve_quadratic(a: float, b: float, c: float) -> tuple:
       - one real root (x,) when discriminant == 0
       - two complex roots (x1, x2) when discriminant < 0
       - one real root (x,) when a == 0 and b != 0 (linear equation)
+      - one real root (x,) when |a| is so small relative to b that the other
+        root's magnitude exceeds the float64 range (~1.8e308). The equation is
+        effectively linear at machine precision; only the representable root
+        is returned. Use has_double_root() to tell this apart from a true
+        double root.
 
     Raises ValueError when a == 0 and b == 0:
       - c == 0 -> infinite solutions
@@ -71,16 +117,7 @@ def solve_quadratic(a: float, b: float, c: float) -> tuple:
         # Linear: b*x + c = 0
         return (-c / b,)
 
-    # Normalise so the largest coefficient has magnitude in [0.5, 1). The roots
-    # are invariant under scaling all coefficients by the same non-zero factor,
-    # but the products b*b and 4*a*c are not: for |coeffs| < ~1e-160 they
-    # underflow to 0.0, which would wrongly look like a zero discriminant.
-    # Scaling by a power of two (via frexp/ldexp) is exact, so well-behaved
-    # inputs like (1, -3, 2) keep producing exact roots (1.0, 2.0).
-    _, exponent = math.frexp(max(abs(a), abs(b), abs(c)))
-    a = math.ldexp(a, -exponent)
-    b = math.ldexp(b, -exponent)
-    c = math.ldexp(c, -exponent)
+    a, b, c = _scale_up(a, b, c)
 
     b_squared = b * b
     four_ac = 4 * a * c
@@ -98,9 +135,14 @@ def solve_quadratic(a: float, b: float, c: float) -> tuple:
         # Instead compute the root that does NOT cancel, then derive the other
         # from the product of roots (x1 * x2 = c / a).
         q_term = -0.5 * (b + math.copysign(math.sqrt(disc), b))
-        root_a = q_term / a
-        root_b = c / q_term
-        return tuple(sorted((root_a, root_b)))
+        large_root = q_term / a   # ~ -b/a when b^2 >> 4ac; may overflow to ±inf
+        small_root = c / q_term   # ~ -c/b when b^2 >> 4ac; always finite
+        if not math.isfinite(large_root):
+            # |b/a| exceeds float64 range (e.g. a=5e-324, b=1). That root
+            # exists mathematically but cannot be represented; the equation
+            # is linear at machine precision.
+            return (small_root,)
+        return tuple(sorted((large_root, small_root)))
 
     # disc < 0 -> complex conjugate roots. No cancellation risk here because
     # sqrt(disc) is purely imaginary and b is real.
@@ -117,7 +159,7 @@ def format_root(root: float | complex) -> str:
         imag_part = format_root(abs(root.imag))
         sign = "+" if root.imag >= 0 else "-"
         return f"{real_part} {sign} {imag_part}i"
-    if float(root).is_integer():
+    if float(root).is_integer() and abs(root) < MAX_INTEGER_DISPLAY:
         return str(int(root))
     return f"{root:.6g}"
 
@@ -154,6 +196,10 @@ def main() -> None:
     except ValueError as exc:
         print(f"Invalid input: {exc}")
         return
+    except (EOFError, KeyboardInterrupt):
+        # Ctrl-D / Ctrl-C / closed stdin: exit cleanly instead of a traceback
+        print("\nAborted.")
+        return
 
     try:
         roots = solve_quadratic(a, b, c)
@@ -163,8 +209,13 @@ def main() -> None:
 
     if a == 0:
         print(f"Linear equation. x = {format_root(roots[0])}")
-    elif len(roots) == 1:
+    elif len(roots) == 1 and has_double_root(a, b, c):
         print(f"One real (double) root: x = {format_root(roots[0])}")
+    elif len(roots) == 1:
+        print(
+            f"One representable real root: x = {format_root(roots[0])} "
+            "(the other root exceeds the floating-point range)"
+        )
     elif isinstance(roots[0], complex):
         print(f"Two complex roots: x1 = {format_root(roots[0])}, x2 = {format_root(roots[1])}")
     else:
