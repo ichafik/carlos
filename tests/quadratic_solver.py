@@ -26,8 +26,50 @@ from apps.quadratic_solver import (  # noqa: E402
     discriminant,
     format_root,
     main,
+    parse_coefficient,
     solve_quadratic,
 )
+
+
+class TestParseCoefficient(unittest.TestCase):
+    def test_integer(self):
+        self.assertEqual(parse_coefficient("3"), 3.0)
+
+    def test_decimal_and_negative(self):
+        self.assertEqual(parse_coefficient("-0.25"), -0.25)
+
+    def test_scientific_notation(self):
+        self.assertEqual(parse_coefficient("1e3"), 1000.0)
+
+    def test_strips_whitespace(self):
+        self.assertEqual(parse_coefficient("  2 \n"), 2.0)
+
+    def test_non_numeric_raises(self):
+        with self.assertRaises(ValueError) as ctx:
+            parse_coefficient("abc", name="Coefficient a")
+        self.assertIn("must be a number", str(ctx.exception))
+        self.assertIn("Coefficient a", str(ctx.exception))
+
+    def test_empty_raises(self):
+        with self.assertRaises(ValueError):
+            parse_coefficient("")
+
+    def test_inf_raises(self):
+        for text in ("inf", "Infinity", "-inf", "+INF"):
+            with self.subTest(text=text), self.assertRaises(ValueError) as ctx:
+                parse_coefficient(text)
+            self.assertIn("finite", str(ctx.exception))
+
+    def test_nan_raises(self):
+        for text in ("nan", "NaN", "-nan"):
+            with self.subTest(text=text), self.assertRaises(ValueError) as ctx:
+                parse_coefficient(text)
+            self.assertIn("finite", str(ctx.exception))
+
+    def test_overflow_literal_raises(self):
+        # A literal too large for a float parses as inf and must be rejected
+        with self.assertRaises(ValueError):
+            parse_coefficient("1e999")
 
 
 class TestDiscriminant(unittest.TestCase):
@@ -149,7 +191,21 @@ class TestMain(unittest.TestCase):
 
     def test_invalid_number(self):
         out = self.run_main(["abc", "1", "1"])
-        self.assertIn("Invalid input: coefficients must be numbers.", out)
+        self.assertIn("Invalid input: Coefficient a must be a number, got 'abc'.", out)
+
+    def test_infinite_coefficient_rejected(self):
+        out = self.run_main(["1", "inf", "1"])
+        self.assertIn("Invalid input: Coefficient b must be a finite number, got 'inf'.", out)
+
+    def test_nan_coefficient_rejected(self):
+        out = self.run_main(["1", "2", "nan"])
+        self.assertIn("Invalid input: Coefficient c must be a finite number, got 'nan'.", out)
+
+    def test_stops_prompting_after_invalid_input(self):
+        # After a bad "a", main must not ask for b and c
+        with patch("builtins.input", side_effect=["nan"]) as mock_input, patch("builtins.print"):
+            main()
+        self.assertEqual(mock_input.call_count, 1)
 
     def test_accepts_decimals_and_whitespace(self):
         out = self.run_main([" 0.5 ", "0", "-2"])

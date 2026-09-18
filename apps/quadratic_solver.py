@@ -68,10 +68,25 @@ def format_root(x) -> str:
     return f"{x:.6g}"
 
 
+def parse_coefficient(raw: str, name: str = "coefficient") -> float:
+    """Convert user text to a finite float.
+
+    Raises ValueError if the text is not a number or is inf/-inf/nan,
+    since those would produce meaningless results in the solver.
+    """
+    try:
+        val = float(raw.strip())
+    except ValueError:
+        raise ValueError(f"{name} must be a number, got {raw.strip()!r}.") from None
+    if not math.isfinite(val):
+        raise ValueError(f"{name} must be a finite number, got {raw.strip()!r}.")
+    return val
+
+
 def read_coefficient(name: str) -> float:
-    """Prompt for a single numeric coefficient."""
+    """Prompt for a single numeric coefficient and validate it."""
     raw = input(f"Enter coefficient {name}: ")
-    return float(raw.strip())
+    return parse_coefficient(raw, name=f"Coefficient {name}")
 
 
 def main() -> None:
@@ -80,8 +95,8 @@ def main() -> None:
         a = read_coefficient("a")
         b = read_coefficient("b")
         c = read_coefficient("c")
-    except ValueError:
-        print("Invalid input: coefficients must be numbers.")
+    except ValueError as exc:
+        print(f"Invalid input: {exc}")
         return
 
     try:
