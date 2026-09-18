@@ -198,13 +198,12 @@ class TestSolveQuadratic(unittest.TestCase):
 
     # --- floating-point robustness -------------------------------------------
 
-    def test_perfect_square_with_rounding_noise_gives_real_double_root(self):
+    def test_double_root_floating_point_imprecision(self):
         # (x - 0.7)^2 = x^2 - 1.4x + 0.49. In binary floats b^2 - 4ac = -2.2e-16,
         # which used to produce spurious complex roots with tiny imaginary parts.
         roots = solve_quadratic(1.0, -1.4, 0.49)
-        self.assertEqual(len(roots), 1)
+        self.assertEqual(roots, (0.7,))
         self.assertNotIsInstance(roots[0], complex)
-        self.assertAlmostEqual(roots[0], 0.7, places=12)
 
     def test_more_perfect_squares_with_non_representable_roots(self):
         # (x - r)^2 for several r that are not exact in binary
@@ -238,12 +237,19 @@ class TestSolveQuadratic(unittest.TestCase):
         self.assertAlmostEqual(roots[0], 1.0, places=9)
         self.assertAlmostEqual(roots[1], 1.000001, places=9)
 
-    def test_no_catastrophic_cancellation_when_b_squared_dominates(self):
+    def test_catastrophic_cancellation_large_b(self):
         # x^2 + 1e8 x + 1 = 0 -> roots ~ -1e8 and -1e-8.
         # Textbook formula returned ~ -7.45e-9 (25% off) for the small root.
-        roots = solve_quadratic(1, 1e8, 1)
+        roots = solve_quadratic(1.0, 1e8, 1.0)
+        self.assertEqual(len(roots), 2)
+        # Both roots non-zero and accurate to ~1e-12 relative
         self.assertAlmostEqual(roots[0] / -1e8, 1.0, places=12)
         self.assertAlmostEqual(roots[1] / -1e-8, 1.0, places=12)
+        # And each root satisfies a*x^2 + b*x + c = 0 within float tolerance
+        for root in roots:
+            residual = 1.0 * root * root + 1e8 * root + 1.0
+            scale = max(abs(1e8 * root), 1.0)
+            self.assertLess(abs(residual) / scale, 1e-12, (root, residual))
 
     def test_no_cancellation_with_negative_b(self):
         # x^2 - 1e8 x + 1 = 0 -> roots ~ 1e-8 and 1e8 (mirror of the above)
@@ -266,6 +272,62 @@ class TestSolveQuadratic(unittest.TestCase):
                     residual = a * root * root + b * root + c
                     scale = max(abs(a * root * root), abs(b * root), abs(c), 1e-300)
                     self.assertLess(abs(residual) / scale, 1e-12)
+
+    # --- underflow with tiny coefficients --------------------------------------
+
+    def test_tiny_coefficients_complex_roots_not_collapsed(self):
+        # x^2 + x + 1 = 0 scaled by 1e-170. b*b and 4*a*c both underflow to 0.0,
+        # which previously looked like a zero discriminant -> returned (-0.5,).
+        roots = solve_quadratic(1e-170, 1e-170, 1e-170)
+        self.assertEqual(len(roots), 2)
+        self.assertTrue(all(isinstance(r, complex) for r in roots))
+        self.assertAlmostEqual(roots[0], complex(-0.5, -math.sqrt(3) / 2))
+        self.assertAlmostEqual(roots[1], complex(-0.5, math.sqrt(3) / 2))
+
+    def test_tiny_coefficients_two_real_roots_not_collapsed(self):
+        # (x - 1)(x - 2) scaled by 1e-170; previously returned (1.5,)
+        roots = solve_quadratic(1e-170, -3e-170, 2e-170)
+        self.assertEqual(len(roots), 2)
+        self.assertAlmostEqual(roots[0], 1.0, places=12)
+        self.assertAlmostEqual(roots[1], 2.0, places=12)
+
+    def test_tiny_coefficients_genuine_double_root_still_detected(self):
+        # (x - 0.7)^2 scaled by 1e-170 must still be a single real root
+        roots = solve_quadratic(1e-170, -1.4e-170, 0.49e-170)
+        self.assertEqual(len(roots), 1, roots)
+        self.assertAlmostEqual(roots[0], 0.7, places=12)
+
+    def test_subnormal_coefficients(self):
+        # 5e-324 is the smallest positive float64 (subnormal)
+        tiny = 5e-324
+        roots = solve_quadratic(tiny, tiny, tiny)
+        self.assertEqual(len(roots), 2)
+        self.assertTrue(all(isinstance(r, complex) for r in roots))
+        self.assertAlmostEqual(roots[0].real, -0.5)
+
+    def test_roots_invariant_under_coefficient_scaling(self):
+        # Scaling all coefficients by any factor must not change the roots
+        reference = solve_quadratic(2.0, 3.0, -2.0)  # (-2, 0.5)
+        for factor in (1e-300, 1e-170, 1e-50, 1e-3, 1e3, 1e50, 1e149):
+            with self.subTest(factor=factor):
+                roots = solve_quadratic(2.0 * factor, 3.0 * factor, -2.0 * factor)
+                self.assertEqual(len(roots), len(reference))
+                for got, want in zip(roots, reference):
+                    self.assertAlmostEqual(got, want, places=12)
+
+    def test_normalisation_is_exact_for_ordinary_inputs(self):
+        # Power-of-two scaling must not introduce rounding into simple cases
+        self.assertEqual(solve_quadratic(1, -3, 2), (1.0, 2.0))
+        self.assertEqual(solve_quadratic(2, 3, -2), (-2.0, 0.5))
+        self.assertEqual(solve_quadratic(3, -12, 9), (1.0, 3.0))
+        self.assertEqual(solve_quadratic(1, 2, 1), (-1.0,))
+
+    def test_mixed_tiny_and_normal_coefficients(self):
+        # 1e-170 x^2 + x + 1 = 0: roots ~ -1e170 and -1; b*b does not underflow
+        # here, but the tiny 4ac must not be mishandled either.
+        roots = solve_quadratic(1e-170, 1.0, 1.0)
+        self.assertAlmostEqual(roots[0] / -1e170, 1.0, places=12)
+        self.assertAlmostEqual(roots[1], -1.0, places=12)
 
     def test_large_but_bounded_coefficients_produce_finite_roots(self):
         roots = solve_quadratic(1e150, 0, -1e150)  # x^2 = 1
@@ -320,6 +382,16 @@ class TestMain(unittest.TestCase):
     def test_no_solution(self):
         out = self.run_main(["0", "0", "5"])
         self.assertTrue(any(line.startswith("Result: No solution") for line in out))
+
+    def test_main_infinite_solutions(self):
+        # 0x^2 + 0x + 0 = 0 holds for every x; main must report it and exit cleanly
+        with patch("builtins.input", side_effect=["0", "0", "0"]) as mock_input, \
+             patch("builtins.print") as mock_print:
+            result = main()  # must not raise
+        out = [call.args[0] for call in mock_print.call_args_list]
+        self.assertIn("Result: Every x is a solution (0 = 0).", out)
+        self.assertIsNone(result)
+        self.assertEqual(mock_input.call_count, 3)
 
     def test_invalid_number(self):
         out = self.run_main(["abc", "1", "1"])
