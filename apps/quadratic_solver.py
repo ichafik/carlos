@@ -55,17 +55,16 @@ def solve_quadratic(a: float, b: float, c: float) -> tuple:
     return (x1, x2)
 
 
-def format_root(x) -> str:
+def format_root(root: float | complex) -> str:
     """Pretty-print a root, dropping trailing .0 and tidying complex numbers."""
-    if isinstance(x, complex):
-        re, im = x.real, x.imag
-        re_s = format_root(re)
-        im_s = format_root(abs(im))
-        sign = "+" if im >= 0 else "-"
-        return f"{re_s} {sign} {im_s}i"
-    if float(x).is_integer():
-        return str(int(x))
-    return f"{x:.6g}"
+    if isinstance(root, complex):
+        real_part = format_root(root.real)
+        imag_part = format_root(abs(root.imag))
+        sign = "+" if root.imag >= 0 else "-"
+        return f"{real_part} {sign} {imag_part}i"
+    if float(root).is_integer():
+        return str(int(root))
+    return f"{root:.6g}"
 
 
 def parse_coefficient(raw: str, name: str = "coefficient") -> float:
