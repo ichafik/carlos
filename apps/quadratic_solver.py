@@ -15,6 +15,14 @@ import math
 # inf/nan roots. 1e150 leaves headroom while covering any realistic input.
 MAX_COEFFICIENT = 1e150
 
+# Relative tolerance for treating b^2 and 4ac as equal (i.e. discriminant == 0).
+# Perfect squares like x^2 - 1.4x + 0.49 give b^2 - 4ac = -2.2e-16 in binary
+# floating point; without this we'd report spurious complex roots.
+# A relative tolerance (rather than absolute) keeps the check scale-invariant.
+# Rounding noise is ~1e-16 relative; 1e-14 gives 100x headroom while still
+# distinguishing genuinely distinct roots that differ by more than ~1e-7.
+DISCRIMINANT_REL_TOL = 1e-14
+
 
 def validate_coefficient(value: float, name: str = "coefficient") -> float:
     """Ensure a coefficient is a finite number within MAX_COEFFICIENT bounds.
@@ -61,22 +69,32 @@ def solve_quadratic(a: float, b: float, c: float) -> tuple:
         # Linear: b*x + c = 0
         return (-c / b,)
 
-    d = discriminant(a, b, c)
+    b_squared = b * b
+    four_ac = 4 * a * c
 
-    if d > 0:
-        sqrt_d = math.sqrt(d)
-        x1 = (-b - sqrt_d) / (2 * a)
-        x2 = (-b + sqrt_d) / (2 * a)
-        return tuple(sorted((x1, x2)))
-
-    if d == 0:
+    # Double root. Compare b^2 and 4ac with a relative tolerance so that
+    # rounding noise (e.g. -2.2e-16) is not mistaken for a negative discriminant.
+    if math.isclose(b_squared, four_ac, rel_tol=DISCRIMINANT_REL_TOL):
         return (-b / (2 * a),)
 
-    # d < 0 -> complex conjugate roots
-    sqrt_d = cmath.sqrt(d)
-    x1 = (-b - sqrt_d) / (2 * a)
-    x2 = (-b + sqrt_d) / (2 * a)
-    return (x1, x2)
+    disc = b_squared - four_ac
+
+    if disc > 0:
+        # Numerically stable form. The textbook (-b ± sqrt(d)) / 2a suffers
+        # catastrophic cancellation when b^2 >> 4ac because sqrt(d) ~= |b|.
+        # Instead compute the root that does NOT cancel, then derive the other
+        # from the product of roots (x1 * x2 = c / a).
+        q_term = -0.5 * (b + math.copysign(math.sqrt(disc), b))
+        root_a = q_term / a
+        root_b = c / q_term
+        return tuple(sorted((root_a, root_b)))
+
+    # disc < 0 -> complex conjugate roots. No cancellation risk here because
+    # sqrt(disc) is purely imaginary and b is real.
+    sqrt_disc = cmath.sqrt(disc)
+    root_a = (-b - sqrt_disc) / (2 * a)
+    root_b = (-b + sqrt_disc) / (2 * a)
+    return (root_a, root_b)
 
 
 def format_root(root: float | complex) -> str:

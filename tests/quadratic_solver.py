@@ -196,6 +196,77 @@ class TestSolveQuadratic(unittest.TestCase):
         with self.assertRaises(ValueError):
             solve_quadratic(float("nan"), 1, 1)
 
+    # --- floating-point robustness -------------------------------------------
+
+    def test_perfect_square_with_rounding_noise_gives_real_double_root(self):
+        # (x - 0.7)^2 = x^2 - 1.4x + 0.49. In binary floats b^2 - 4ac = -2.2e-16,
+        # which used to produce spurious complex roots with tiny imaginary parts.
+        roots = solve_quadratic(1.0, -1.4, 0.49)
+        self.assertEqual(len(roots), 1)
+        self.assertNotIsInstance(roots[0], complex)
+        self.assertAlmostEqual(roots[0], 0.7, places=12)
+
+    def test_more_perfect_squares_with_non_representable_roots(self):
+        # (x - r)^2 for several r that are not exact in binary
+        for r in (0.1, 0.3, 1.1, -2.7, 123.456):
+            with self.subTest(r=r):
+                roots = solve_quadratic(1.0, -2 * r, r * r)
+                self.assertEqual(len(roots), 1, roots)
+                self.assertNotIsInstance(roots[0], complex)
+                self.assertAlmostEqual(roots[0], r, places=10)
+
+    def test_double_root_tolerance_is_scale_invariant(self):
+        # Same perfect square scaled by 1e100 and 1e-100 must still be detected
+        for scale in (1e100, 1e-100):
+            with self.subTest(scale=scale):
+                roots = solve_quadratic(scale, -1.4 * scale, 0.49 * scale)
+                self.assertEqual(len(roots), 1, roots)
+                self.assertAlmostEqual(roots[0], 0.7, places=12)
+
+    def test_genuinely_tiny_negative_discriminant_stays_complex(self):
+        # x^2 + 1e-13 = 0 has a real negative discriminant (-4e-13), not noise.
+        # An absolute tolerance would wrongly collapse this to a double root.
+        roots = solve_quadratic(1, 0, 1e-13)
+        self.assertEqual(len(roots), 2)
+        self.assertTrue(all(isinstance(r, complex) for r in roots))
+
+    def test_genuinely_tiny_positive_discriminant_stays_two_real_roots(self):
+        # (x - 1)(x - 1.000001): b^2 and 4ac differ by only ~2.5e-13 relative,
+        # well above rounding noise, so these must remain two distinct roots.
+        roots = solve_quadratic(1.0, -2.000001, 1.000001)
+        self.assertEqual(len(roots), 2, roots)
+        self.assertAlmostEqual(roots[0], 1.0, places=9)
+        self.assertAlmostEqual(roots[1], 1.000001, places=9)
+
+    def test_no_catastrophic_cancellation_when_b_squared_dominates(self):
+        # x^2 + 1e8 x + 1 = 0 -> roots ~ -1e8 and -1e-8.
+        # Textbook formula returned ~ -7.45e-9 (25% off) for the small root.
+        roots = solve_quadratic(1, 1e8, 1)
+        self.assertAlmostEqual(roots[0] / -1e8, 1.0, places=12)
+        self.assertAlmostEqual(roots[1] / -1e-8, 1.0, places=12)
+
+    def test_no_cancellation_with_negative_b(self):
+        # x^2 - 1e8 x + 1 = 0 -> roots ~ 1e-8 and 1e8 (mirror of the above)
+        roots = solve_quadratic(1, -1e8, 1)
+        self.assertAlmostEqual(roots[0] / 1e-8, 1.0, places=12)
+        self.assertAlmostEqual(roots[1] / 1e8, 1.0, places=12)
+
+    def test_no_cancellation_with_tiny_leading_coefficient(self):
+        # 1e-200 x^2 + x + 1 = 0 -> roots ~ -1e200 and -1.
+        # Textbook formula returned 0.0 for the second root.
+        roots = solve_quadratic(1e-200, 1, 1)
+        self.assertAlmostEqual(roots[0] / -1e200, 1.0, places=12)
+        self.assertAlmostEqual(roots[1], -1.0, places=12)
+
+    def test_stable_formula_roots_satisfy_equation_relative(self):
+        # Residual check using relative error, across badly-conditioned inputs
+        for a, b, c in [(1, 1e8, 1), (1, -1e8, 1), (1e-200, 1, 1), (3, -7, 2), (2, 3, -2)]:
+            for root in solve_quadratic(a, b, c):
+                with self.subTest(coeffs=(a, b, c), root=root):
+                    residual = a * root * root + b * root + c
+                    scale = max(abs(a * root * root), abs(b * root), abs(c), 1e-300)
+                    self.assertLess(abs(residual) / scale, 1e-12)
+
     def test_large_but_bounded_coefficients_produce_finite_roots(self):
         roots = solve_quadratic(1e150, 0, -1e150)  # x^2 = 1
         self.assertEqual(roots, (-1.0, 1.0))
