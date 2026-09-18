@@ -14,6 +14,8 @@ import math
 # multiplies a*c, so anything above ~1e154 saturates float64 to inf and yields
 # inf/nan roots. 1e150 leaves headroom while covering any realistic input.
 MAX_COEFFICIENT = 1e150
+# Note: there is deliberately no MIN_COEFFICIENT. Tiny coefficients are handled
+# by normalising inside solve_quadratic (see comment there).
 
 # Relative tolerance for treating b^2 and 4ac as equal (i.e. discriminant == 0).
 # Perfect squares like x^2 - 1.4x + 0.49 give b^2 - 4ac = -2.2e-16 in binary
@@ -68,6 +70,17 @@ def solve_quadratic(a: float, b: float, c: float) -> tuple:
             raise ValueError("No solution (the equation reduces to a false constant).")
         # Linear: b*x + c = 0
         return (-c / b,)
+
+    # Normalise so the largest coefficient has magnitude in [0.5, 1). The roots
+    # are invariant under scaling all coefficients by the same non-zero factor,
+    # but the products b*b and 4*a*c are not: for |coeffs| < ~1e-160 they
+    # underflow to 0.0, which would wrongly look like a zero discriminant.
+    # Scaling by a power of two (via frexp/ldexp) is exact, so well-behaved
+    # inputs like (1, -3, 2) keep producing exact roots (1.0, 2.0).
+    _, exponent = math.frexp(max(abs(a), abs(b), abs(c)))
+    a = math.ldexp(a, -exponent)
+    b = math.ldexp(b, -exponent)
+    c = math.ldexp(c, -exponent)
 
     b_squared = b * b
     four_ac = 4 * a * c
