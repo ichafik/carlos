@@ -1,4 +1,4 @@
-name: Carlos PR Review
+name: Carlos Code Reviewer
 
 on:
   pull_request:

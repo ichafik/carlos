@@ -1,8 +1,8 @@
 """
-Carlos — PR reviewer and merge gatekeeper
+Carlos Code Reviewer — PR reviewer and merge gatekeeper
 
-Named after Roberto Carlos, Brazil's legendary left-back: nothing gets past him
-into main without earning it. Powered by the Gemini API.
+Reviews every pull request with the Gemini API, scores it, and enforces a
+score-based approval policy before anything reaches main.
 
 Modes (derived from the GitHub event)
   pull_request        -> review : ask Gemini, score, post report, publish gate status
@@ -56,7 +56,7 @@ Score rubric (0-100):
   style / maintainability ........ 15
 """
 
-SYSTEM_PROMPT = f"""You are Carlos, a senior software engineer and the last line of defence before main. Perform a rigorous pull-request review.
+SYSTEM_PROMPT = f"""You are Carlos, a senior software engineer acting as the code reviewer for this repository. Perform a rigorous pull-request review.
 Return ONLY a JSON object (no prose, no markdown fences) with this exact shape:
 
 {{
@@ -313,7 +313,7 @@ def render(review, policy, approvals):
     sev_icon = {"blocker": "🟥", "major": "🟧", "minor": "🟨", "nit": "⬜"}
     st_icon = {"covered": "✅", "not_covered": "❌", "not_applicable": "➖"}
     L = [MARKER, f"<!-- score:{policy['score']} required:{policy['required']} auto:{policy['auto_merge']} -->",
-         f"## ⚽ Carlos reviewed this PR — Score **{policy['score']}%**", ""]
+         f"## 🔍 Carlos Code Review — Score **{policy['score']}%**", ""]
 
     if policy["required"] == 0 and policy["auto_merge"]:
         L.append("✅ **Eligible for auto-merge** (≥95%, no blockers, no protected paths).")
@@ -390,7 +390,7 @@ def render(review, policy, approvals):
     L.append(f"\n_{review.get('score_justification','')}_")
     L.append("\n<sub>Policy: ≥95 auto-merge · 50–94 one approver · <50 two approvers. "
              f"Commands: `{BOT_NAME} review` · `{BOT_NAME} merge`. "
-             "Carlos guards main the way Roberto Carlos guarded Brazil's left flank.</sub>")
+             "Carlos Code Reviewer · powered by Gemini.</sub>")
     return "\n".join(L)
 
 
