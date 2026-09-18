@@ -18,13 +18,61 @@ concurrency:
   group: pr-review-${{ github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: false
 
+env:
+  TEST_DIR: tests   # folder containing the test scripts; every *.py in here is run
+
 jobs:
+  # ---------------------------------------------------------------------------
+  # Run every Python test script found in the test folder.
+  # Only runs on code-changing events (PR opened/updated); skipped for
+  # review/comment events so "carlos ..." commands stay fast.
+  # ---------------------------------------------------------------------------
+  tests:
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps (if requirements.txt exists)
+        run: |
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            echo "No requirements.txt found - skipping."
+          fi
+
+      - name: List test scripts
+        run: |
+          echo "Test scripts discovered in ./${TEST_DIR}:"
+          find "${TEST_DIR}" -maxdepth 1 -name "*.py" -type f | sort
+
+      - name: Run all test scripts in ${{ env.TEST_DIR }}
+        # -s  : start directory to search
+        # -p  : pattern – "*.py" picks up ANY script in the folder, not just test_*.py
+        # -v  : verbose per-test output
+        # Runs from the repo root so `apps.*` imports resolve.
+        run: python -m unittest discover -s "${TEST_DIR}" -p "*.py" -v
+
+  # ---------------------------------------------------------------------------
+  # AI review / gate / command handling.
+  # Depends on `tests`: if tests fail, the review is skipped and auto-merge
+  # cannot happen. If tests were skipped (comment/review events) we still run.
+  # ---------------------------------------------------------------------------
   carlos:
+    needs: tests
     # PR events: skip drafts. Comment events: only on PRs, only "carlos ..." commands.
     if: >
-      (github.event_name != 'issue_comment' && github.event.pull_request.draft == false) ||
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
-       startsWith(github.event.comment.body, 'carlos '))
+      !cancelled() &&
+      (needs.tests.result == 'success' || needs.tests.result == 'skipped') &&
+      (
+        (github.event_name != 'issue_comment' && github.event.pull_request.draft == false) ||
+        (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+         startsWith(github.event.comment.body, 'carlos '))
+      )
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,12 +99,16 @@ jobs:
           BOT_NAME: carlos
           STATUS_CONTEXT: Carlos Review Gate   # name of the required status check in branch protection
           MODEL: gemini-3.8-flash   # e.g. gemini-3.8-flash, gemini-2.5-pro
+          TESTS_RESULT: ${{ needs.tests.result }}   # success | skipped – available to the review script
           # Paths that always require at least one human approver, even at 95%+
           PROTECTED_PATHS: "auth/,payments/,migrations/,infra/,.github/workflows/"
         run: python .github/scripts/carlos_review.py
 
-      - name: Enable auto-merge (score >= 95, no blockers, unprotected)
-        if: steps.carlos.outputs.auto_merge == 'true' && github.event_name == 'pull_request'
+      - name: Enable auto-merge (score >= 95, no blockers, unprotected, tests passed)
+        if: >
+          steps.carlos.outputs.auto_merge == 'true' &&
+          github.event_name == 'pull_request' &&
+          needs.tests.result == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh pr merge ${{ github.event.pull_request.number }} --auto --squash --repo ${{ github.repository }}
