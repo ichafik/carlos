@@ -152,7 +152,7 @@ def upsert_comment(body):
 
 def set_labels(score_label):
     labels = [l["name"] for l in gh("GET", f"/repos/{REPO}/issues/{PR}/labels")]
-    keep = [l for l in labels if not l.startswith("carlos-review:")]
+    keep = [l for l in labels if not l.startswith("Carlos-review:")]
     gh("PUT", f"/repos/{REPO}/issues/{PR}/labels", json={"labels": keep + [score_label]})
 
 
