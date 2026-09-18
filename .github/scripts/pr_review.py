@@ -1,5 +1,5 @@
 """
-AI PR Review Gate
+Carlos
 
 MODE=review : fetch the diff, ask Claude for a structured review, compute the score,
               post/update the report comment, publish the gate status, decide auto-merge.
@@ -152,7 +152,7 @@ def upsert_comment(body):
 
 def set_labels(score_label):
     labels = [l["name"] for l in gh("GET", f"/repos/{REPO}/issues/{PR}/labels")]
-    keep = [l for l in labels if not l.startswith("ai-review:")]
+    keep = [l for l in labels if not l.startswith("Carlos-review:")]
     gh("PUT", f"/repos/{REPO}/issues/{PR}/labels", json={"labels": keep + [score_label]})
 
 
@@ -215,7 +215,7 @@ def render(review, policy, approvals):
     sev_icon = {"blocker": "🟥", "major": "🟧", "minor": "🟨", "nit": "⬜"}
     st_icon = {"covered": "✅", "not_covered": "❌", "not_applicable": "➖"}
     L = [MARKER, f"<!-- score:{policy['score']} required:{policy['required']} auto:{policy['auto_merge']} -->",
-         f"## 🤖 AI PR Review — Score **{policy['score']}%**", ""]
+         f"## 🤖 CARLOS PR REVIEW — Score **{policy['score']}%**", ""]
 
     if policy["required"] == 0 and policy["auto_merge"]:
         L.append("✅ **Eligible for auto-merge** (≥95%, no blockers, no protected paths).")
@@ -310,7 +310,7 @@ def run_review():
     policy = apply_policy(review, changed)
     approvals = count_approvals()
     upsert_comment(render(review, policy, approvals))
-    set_labels(f"ai-review:{policy['score']}")
+    set_labels(f"Carlos-review:{policy['score']}")
     publish_gate(policy["score"], policy["required"], approvals, policy["auto_merge"])
     print(f"score={policy['score']} required={policy['required']} auto_merge={policy['auto_merge']}")
 

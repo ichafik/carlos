@@ -1,4 +1,4 @@
-# AI PR Review Gate
+# CARLOS PR REVIEW Gate
 
 Claude reviews every pull request, posts a report (summary, issues, edge-cases table,
 test readiness, score), and enforces a score-based approval policy.
