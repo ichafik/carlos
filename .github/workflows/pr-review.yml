@@ -1,4 +1,4 @@
-name: Carlos
+name: Carlos PR Review
 
 on:
   pull_request:
@@ -11,7 +11,7 @@ on:
 permissions:
   contents: write        # merge
   pull-requests: write   # comments, labels
-  statuses: write        # "PR Review Gate" commit status
+  statuses: write        # "Carlos Review Gate" commit status
   checks: read
 
 concurrency:
@@ -19,7 +19,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  review:
+  carlos:
     # PR events: skip drafts. Comment events: only on PRs, only "carlos ..." commands.
     if: >
       (github.event_name != 'issue_comment' && github.event.pull_request.draft == false) ||
@@ -34,12 +34,12 @@ jobs:
           python-version: "3.12"
 
       - name: Install deps
-        run: pip install anthropic requests
+        run: pip install google-genai requests json-repair
 
       - name: Run review / gate / command
-        id: review
+        id: carlos
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
@@ -49,13 +49,14 @@ jobs:
           COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
           COMMENT_ID: ${{ github.event.comment.id }}
           BOT_NAME: carlos
-          MODEL: claude-sonnet-5
+          STATUS_CONTEXT: Carlos Review Gate   # name of the required status check in branch protection
+          MODEL: gemini-3.8-flash   # e.g. gemini-3.8-flash, gemini-2.5-pro
           # Paths that always require at least one human approver, even at 95%+
           PROTECTED_PATHS: "auth/,payments/,migrations/,infra/,.github/workflows/"
-        run: python .github/scripts/pr_review.py
+        run: python .github/scripts/carlos_review.py
 
       - name: Enable auto-merge (score >= 95, no blockers, unprotected)
-        if: steps.review.outputs.auto_merge == 'true' && github.event_name == 'pull_request'
+        if: steps.carlos.outputs.auto_merge == 'true' && github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh pr merge ${{ github.event.pull_request.number }} --auto --squash --repo ${{ github.repository }}
