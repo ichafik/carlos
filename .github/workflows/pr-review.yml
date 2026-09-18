@@ -34,7 +34,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install deps
-        run: pip install google-genai requests
+        run: pip install google-genai requests json-repair
 
       - name: Run review / gate / command
         id: carlos

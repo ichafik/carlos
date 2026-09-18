@@ -215,6 +215,50 @@ def set_output(key, value):
         f.write(f"{key}={value}\n")
 
 
+# ---------- model ----------
+def parse_review(text):
+    """Best-effort JSON extraction: strip fences, slice to outer braces, repair if needed."""
+    text = re.sub(r"^```(?:json)?|```$", "", (text or "").strip(), flags=re.M).strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        text = text[start:end + 1]
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        from json_repair import repair_json  # tolerant parser for slightly broken output
+        return json.loads(repair_json(text))
+
+
+def ask_model(prompt, attempts=2):
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    last_err = None
+    for attempt in range(1, attempts + 1):
+        resp = client.models.generate_content(
+            model=MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                response_mime_type="application/json",
+                temperature=0.2,
+                max_output_tokens=32768,
+            ),
+        )
+        finish = getattr(resp.candidates[0], "finish_reason", None) if resp.candidates else None
+        text = resp.text or ""
+        print(f"[carlos] attempt {attempt}: finish_reason={finish}, chars={len(text)}")
+        if str(finish).endswith("MAX_TOKENS"):
+            last_err = f"response truncated (MAX_TOKENS) after {len(text)} chars"
+            prompt += "\n\nYour previous answer was cut off. Be more concise: shorter strings, at most 6 items per list."
+            continue
+        try:
+            return parse_review(text)
+        except Exception as e:  # noqa: BLE001
+            last_err = f"{type(e).__name__}: {e}"
+            print(f"[carlos] JSON parse failed: {last_err}\n--- head ---\n{text[:400]}\n--- tail ---\n{text[-400:]}")
+            prompt += "\n\nYour previous answer was not valid JSON. Return ONLY one valid JSON object."
+    raise RuntimeError(f"Carlos could not get a valid review from {MODEL}: {last_err}")
+
+
 # ---------- policy ----------
 def apply_policy(review, changed_files):
     s = review["scores"]
@@ -361,6 +405,7 @@ def publish_gate(score, required, approvals, auto_merge):
     set_output("auto_merge", "true" if auto_merge else "false")
 
 
+# ---------- main ----------
 def run_review():
     set_status("pending", "Carlos is reviewing…")
     pr = get_pr()
@@ -370,23 +415,11 @@ def run_review():
         diff = diff[:MAX_DIFF_CHARS] + "\n\n[diff truncated]"
     changed = get_changed_files()
 
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    resp = client.models.generate_content(
-        model=MODEL,
-        contents=(
-            f"PR title: {pr['title']}\n\nPR description:\n{pr.get('body') or '(none)'}\n\n"
-            f"Changed files:\n" + "\n".join(changed) + f"\n\nDiff:\n{diff}"
-        ),
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            response_mime_type="application/json",
-            temperature=0.2,
-            max_output_tokens=8000,
-        ),
+    prompt = (
+        f"PR title: {pr['title']}\n\nPR description:\n{pr.get('body') or '(none)'}\n\n"
+        f"Changed files:\n" + "\n".join(changed) + f"\n\nDiff:\n{diff}"
     )
-    text = resp.text or ""
-    text = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
-    review = json.loads(text)
+    review = ask_model(prompt)
     if truncated:
         review["confidence"] = "low"
         review["score_justification"] += " (Diff was truncated; confidence lowered.)"
