@@ -1,5 +1,5 @@
 """
-AI PR Review Gate
+Carlos
 
 MODE=review : fetch the diff, ask Claude for a structured review, compute the score,
               post/update the report comment, publish the gate status, decide auto-merge.
