@@ -67,6 +67,30 @@ class GetProviderDispatchTests(unittest.TestCase):
         os.environ["GEMINI_API_KEY"] = "test-key"
         self.assertIsInstance(llm_providers.get_provider(""), llm_providers.GeminiProvider)
 
+    def test_canonical_provider_name_resolves_aliases_to_dispatched_class(self):
+        # Regression test: canonical_provider_name() must agree with
+        # get_provider()'s dispatch table, so a MODEL default keyed off
+        # DEFAULT_MODELS[canonical_provider_name(PROVIDER)] always matches
+        # the model the actually-instantiated provider uses.
+        cases = {
+            "chatgpt": llm_providers.OpenAIProvider,
+            "openai": llm_providers.OpenAIProvider,
+            "anthropic": llm_providers.ClaudeProvider,
+            "claude": llm_providers.ClaudeProvider,
+            "gemini": llm_providers.GeminiProvider,
+        }
+        os.environ["OPENAI_API_KEY"] = "k"
+        os.environ["ANTHROPIC_API_KEY"] = "k"
+        os.environ["GEMINI_API_KEY"] = "k"
+        for alias, expected_cls in cases.items():
+            canonical = llm_providers.canonical_provider_name(alias)
+            expected_model = llm_providers.DEFAULT_MODELS[canonical]
+            actual_provider = llm_providers.get_provider(alias)
+            self.assertIsInstance(actual_provider, expected_cls)
+            self.assertEqual(
+                expected_model, llm_providers.DEFAULT_MODELS[actual_provider.name]
+            )
+
 
 class GenerateGlueTests(unittest.TestCase):
     """Fakes each SDK module so generate()'s request/response wiring is
@@ -106,14 +130,64 @@ class GenerateGlueTests(unittest.TestCase):
                 self.completions = FakeCompletions()
 
         class FakeOpenAI:
-            def __init__(self, api_key=None):
+            def __init__(self, api_key=None, timeout=None):
                 self.api_key = api_key
+                self.timeout = timeout
                 self.chat = FakeChat()
 
         fake_openai.OpenAI = FakeOpenAI
         sys.modules["openai"] = fake_openai
 
         provider = llm_providers.get_provider("openai")
+        text, truncated = provider.generate(
+            prompt="diff here", system_prompt="sys", seed=42, temperature=0, max_output_tokens=100
+        )
+        self.assertEqual(text, '{"summary": "ok"}')
+        self.assertTrue(truncated)
+
+    def test_gemini_generate_reports_truncation(self):
+        fake_google = types.ModuleType("google")
+        fake_genai = types.ModuleType("google.genai")
+        fake_genai_types = types.ModuleType("google.genai.types")
+
+        class FakeHttpOptions:
+            def __init__(self, timeout=None):
+                self.timeout = timeout
+
+        class FakeConfig:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        class FakeCandidate:
+            def __init__(self):
+                self.finish_reason = "MAX_TOKENS"
+
+        class FakeResp:
+            def __init__(self):
+                self.candidates = [FakeCandidate()]
+                self.text = '{"summary": "ok"}'
+
+        class FakeModels:
+            def generate_content(self, **kwargs):
+                self.last_kwargs = kwargs
+                return FakeResp()
+
+        class FakeClient:
+            def __init__(self, api_key=None, http_options=None):
+                self.api_key = api_key
+                self.http_options = http_options
+                self.models = FakeModels()
+
+        fake_genai_types.HttpOptions = FakeHttpOptions
+        fake_genai_types.GenerateContentConfig = FakeConfig
+        fake_genai.types = fake_genai_types
+        fake_genai.Client = FakeClient
+        fake_google.genai = fake_genai
+        sys.modules["google"] = fake_google
+        sys.modules["google.genai"] = fake_genai
+        sys.modules["google.genai.types"] = fake_genai_types
+
+        provider = llm_providers.get_provider("gemini")
         text, truncated = provider.generate(
             prompt="diff here", system_prompt="sys", seed=42, temperature=0, max_output_tokens=100
         )
@@ -138,8 +212,9 @@ class GenerateGlueTests(unittest.TestCase):
                 return FakeResp()
 
         class FakeAnthropic:
-            def __init__(self, api_key=None):
+            def __init__(self, api_key=None, timeout=None):
                 self.api_key = api_key
+                self.timeout = timeout
                 self.messages = FakeMessages()
 
         fake_anthropic.Anthropic = FakeAnthropic

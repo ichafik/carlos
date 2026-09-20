@@ -23,6 +23,11 @@ DEFAULT_MODELS = {
     "claude": "claude-sonnet-4-5",
 }
 
+# WB-REL-03: every network call needs an explicit timeout so a hung LLM API
+# doesn't stall a workflow run indefinitely. Override via env if a slower
+# model/larger prompt legitimately needs more time.
+REQUEST_TIMEOUT_SECONDS = float(os.environ.get("LLM_REQUEST_TIMEOUT_SECONDS", "60"))
+
 
 class LLMProvider(ABC):
     """Common interface every provider must implement.
@@ -67,7 +72,11 @@ class GeminiProvider(LLMProvider):
         from google import genai
         from google.genai import types
 
-        client = genai.Client(api_key=self._api_key)
+        # HttpOptions.timeout is in milliseconds.
+        client = genai.Client(
+            api_key=self._api_key,
+            http_options=types.HttpOptions(timeout=int(REQUEST_TIMEOUT_SECONDS * 1000)),
+        )
         model = os.environ.get("MODEL") or DEFAULT_MODELS[self.name]
         resp = client.models.generate_content(
             model=model,
@@ -97,7 +106,7 @@ class OpenAIProvider(LLMProvider):
     def generate(self, prompt, system_prompt, seed, temperature, max_output_tokens):
         from openai import OpenAI
 
-        client = OpenAI(api_key=self._api_key)
+        client = OpenAI(api_key=self._api_key, timeout=REQUEST_TIMEOUT_SECONDS)
         model = os.environ.get("MODEL") or DEFAULT_MODELS[self.name]
         resp = client.chat.completions.create(
             model=model,
@@ -134,7 +143,7 @@ class ClaudeProvider(LLMProvider):
                   "seed parameter); reproducibility across runs is best-effort only.")
             ClaudeProvider._warned_no_seed = True
 
-        client = anthropic.Anthropic(api_key=self._api_key)
+        client = anthropic.Anthropic(api_key=self._api_key, timeout=REQUEST_TIMEOUT_SECONDS)
         model = os.environ.get("MODEL") or DEFAULT_MODELS[self.name]
         resp = client.messages.create(
             model=model,
@@ -155,6 +164,25 @@ _DISPATCH = {
     "claude": ClaudeProvider,
     "anthropic": ClaudeProvider,  # alias
 }
+
+# Alias -> canonical name, so anything keying off DEFAULT_MODELS (e.g.
+# carlos_review.py's log/error messages) resolves the same model the
+# dispatched provider instance actually uses.
+_CANONICAL = {
+    "gemini": "gemini",
+    "openai": "openai",
+    "chatgpt": "openai",
+    "claude": "claude",
+    "anthropic": "claude",
+}
+
+
+def canonical_provider_name(name: str) -> str:
+    """Resolve an alias (e.g. 'chatgpt', 'anthropic') to its canonical key in
+    DEFAULT_MODELS/_DISPATCH. Unknown names pass through unchanged so
+    get_provider() is the single place that raises on a bad PROVIDER value."""
+    key = (name or "gemini").strip().lower()
+    return _CANONICAL.get(key, key)
 
 
 def get_provider(name: str) -> LLMProvider:

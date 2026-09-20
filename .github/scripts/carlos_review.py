@@ -23,7 +23,7 @@ import re
 import sys
 
 import requests
-from llm_providers import DEFAULT_MODELS, get_provider
+from llm_providers import DEFAULT_MODELS, canonical_provider_name, get_provider
 
 # ---------- config ----------
 GH = "https://api.github.com"
@@ -38,7 +38,10 @@ SHA = os.environ.get("HEAD_SHA") or ""   # resolved from the PR when empty (comm
 # PROVIDER picks which BYO API key/SDK is used: gemini (default), openai, or claude.
 # Each repo sets its own PROVIDER + matching secret; see llm_providers.py.
 PROVIDER = os.environ.get("PROVIDER", "gemini").strip().lower()
-MODEL = os.environ.get("MODEL") or DEFAULT_MODELS.get(PROVIDER, DEFAULT_MODELS["gemini"])
+# .get(..., "") rather than [...]: an invalid PROVIDER must surface as the
+# clear RuntimeError from get_provider() when it's actually dispatched, not
+# as a KeyError here at import time.
+MODEL = os.environ.get("MODEL") or DEFAULT_MODELS.get(canonical_provider_name(PROVIDER), "")
 PROTECTED = [p.strip() for p in os.environ.get("PROTECTED_PATHS", "").split(",") if p.strip()]
 MARKER = "<!-- carlos-pr-review -->"
 STATUS_CONTEXT = os.environ.get("STATUS_CONTEXT", "Carlos Review Gate")
