@@ -38,11 +38,19 @@ jobs:
           python-version: "3.12"
 
       - name: Install deps (if requirements.txt exists)
+        # tests/test_app_core.py and tests/test_review_engine.py import
+        # app/github_auth.py and app/github_client.py, which import `requests`
+        # for real (cryptography/PyJWT are faked via sys.modules in those test
+        # files, but requests isn't — it has to actually be installed here).
         run: |
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
-          else
-            echo "No requirements.txt found - skipping."
+          fi
+          if [ -f app/requirements.txt ]; then
+            pip install -r app/requirements.txt
+          fi
+          if [ -f .github/scripts/requirements.txt ]; then
+            pip install -r .github/scripts/requirements.txt
           fi
 
       - name: List test scripts
