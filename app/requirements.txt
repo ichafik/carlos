@@ -1,0 +1,9 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+requests==2.32.3
+PyJWT[crypto]==2.9.0
+cryptography==43.0.1
+json-repair==0.30.3
+google-genai==0.7.0
+openai==1.54.4
+anthropic==0.39.0
