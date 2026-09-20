@@ -67,6 +67,16 @@ class GetProviderDispatchTests(unittest.TestCase):
         os.environ["GEMINI_API_KEY"] = "test-key"
         self.assertIsInstance(llm_providers.get_provider(""), llm_providers.GeminiProvider)
 
+    def test_explicit_api_key_bypasses_env_lookup(self):
+        # This is the GitHub App's call path: no repo secret env var exists,
+        # the key comes from key_store.py instead. Confirms no env var is
+        # required (or consulted) when api_key is passed explicitly.
+        for var in ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+            os.environ.pop(var, None)
+        provider = llm_providers.get_provider("claude", api_key="explicit-key")
+        self.assertIsInstance(provider, llm_providers.ClaudeProvider)
+        self.assertEqual(provider._api_key, "explicit-key")
+
     def test_canonical_provider_name_resolves_aliases_to_dispatched_class(self):
         # Regression test: canonical_provider_name() must agree with
         # get_provider()'s dispatch table, so a MODEL default keyed off

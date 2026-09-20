@@ -2,15 +2,23 @@
 LLM provider abstraction for Carlos — "bring your own key" across ChatGPT, Gemini
 and Claude.
 
-Each repo picks ONE provider via the `PROVIDER` env var (default: gemini) and
-supplies that provider's own API key as a repo secret. carlos_review.py never
-talks to an SDK directly; it calls get_provider(name).generate(...) and gets
-back plain text plus a truncation flag, so the rest of the script (JSON
-parsing, scoring, rendering) stays provider-agnostic.
+Shared by two callers with different key sources:
+  - the GitHub Actions script (carlos_review.py): one PROVIDER per repo, key
+    comes from a repo secret env var (GEMINI_API_KEY / OPENAI_API_KEY /
+    ANTHROPIC_API_KEY).
+  - the GitHub App (app/review_engine.py): PROVIDER + key are looked up per
+    installation from key_store.py (a repo secret doesn't exist in that
+    context — one process serves every installation).
+
+Either caller ends up calling get_provider(name, api_key=...).generate(...)
+and gets back plain text plus a truncation flag, so the rest of the review
+logic (JSON parsing, scoring, rendering) stays provider-agnostic. When
+api_key is omitted, get_provider() falls back to reading the matching env
+var directly — that's what keeps the Actions script's call sites unchanged.
 
 Adding a fourth provider later means: one new class implementing generate(),
-one line in get_provider()'s dispatch table, one new secret. Everything else
-in carlos_review.py is unaffected.
+one line in get_provider()'s dispatch table, one new secret/key source.
+Everything else is unaffected.
 """
 
 import os
@@ -50,7 +58,16 @@ class LLMProvider(ABC):
         raise NotImplementedError
 
 
-def _require_key(env_var: str, provider_name: str) -> str:
+# Which env var each canonical provider reads its key from when no explicit
+# api_key is passed to get_provider() (the Actions-script call path).
+_ENV_VARS = {
+    "gemini": "GEMINI_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "claude": "ANTHROPIC_API_KEY",
+}
+
+
+def _require_env_key(env_var: str, provider_name: str) -> str:
     """Fail fast (WB-REL-05) with a message that names the exact secret to add."""
     key = os.environ.get(env_var, "").strip()
     if not key:
@@ -65,8 +82,8 @@ def _require_key(env_var: str, provider_name: str) -> str:
 class GeminiProvider(LLMProvider):
     name = "gemini"
 
-    def __init__(self):
-        self._api_key = _require_key("GEMINI_API_KEY", self.name)
+    def __init__(self, api_key: str):
+        self._api_key = api_key
 
     def generate(self, prompt, system_prompt, seed, temperature, max_output_tokens):
         from google import genai
@@ -100,8 +117,8 @@ class GeminiProvider(LLMProvider):
 class OpenAIProvider(LLMProvider):
     name = "openai"
 
-    def __init__(self):
-        self._api_key = _require_key("OPENAI_API_KEY", self.name)
+    def __init__(self, api_key: str):
+        self._api_key = api_key
 
     def generate(self, prompt, system_prompt, seed, temperature, max_output_tokens):
         from openai import OpenAI
@@ -132,8 +149,8 @@ class ClaudeProvider(LLMProvider):
     #: user who set SEED expecting determinism isn't confused by drift.
     _warned_no_seed = False
 
-    def __init__(self):
-        self._api_key = _require_key("ANTHROPIC_API_KEY", self.name)
+    def __init__(self, api_key: str):
+        self._api_key = api_key
 
     def generate(self, prompt, system_prompt, seed, temperature, max_output_tokens):
         import anthropic
@@ -185,9 +202,17 @@ def canonical_provider_name(name: str) -> str:
     return _CANONICAL.get(key, key)
 
 
-def get_provider(name: str) -> LLMProvider:
-    """Instantiate the provider named by PROVIDER. Raises RuntimeError with a
-    clear, actionable message if the name is unknown or its key is missing."""
+def get_provider(name: str, api_key: str | None = None) -> LLMProvider:
+    """Instantiate the provider named by PROVIDER.
+
+    api_key is optional: pass it explicitly when the caller has its own key
+    source (e.g. the GitHub App reading a per-installation key from
+    key_store.py). Omit it to fall back to the matching repo-secret env var
+    (the GitHub Actions script's call path).
+
+    Raises RuntimeError with a clear, actionable message if the name is
+    unknown or (when api_key is omitted) its env var is missing.
+    """
     key = (name or "gemini").strip().lower()
     cls = _DISPATCH.get(key)
     if cls is None:
@@ -195,4 +220,7 @@ def get_provider(name: str) -> LLMProvider:
             f"Unknown PROVIDER '{name}'. Supported values: "
             f"gemini, openai (chatgpt), claude (anthropic)."
         )
-    return cls()
+    if api_key is None:
+        canonical = _CANONICAL.get(key, key)
+        api_key = _require_env_key(_ENV_VARS[canonical], key)
+    return cls(api_key)
