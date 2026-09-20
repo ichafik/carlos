@@ -23,8 +23,7 @@ import re
 import sys
 
 import requests
-from google import genai
-from google.genai import types
+from llm_providers import DEFAULT_MODELS, get_provider
 
 # ---------- config ----------
 GH = "https://api.github.com"
@@ -36,7 +35,10 @@ COMMENT_AUTHOR = os.environ.get("COMMENT_AUTHOR", "")
 COMMENT_ID = os.environ.get("COMMENT_ID", "")
 BOT_NAME = os.environ.get("BOT_NAME", "carlos").lower()
 SHA = os.environ.get("HEAD_SHA") or ""   # resolved from the PR when empty (comment events)
-MODEL = os.environ.get("MODEL", "gemini-3.8-flash")
+# PROVIDER picks which BYO API key/SDK is used: gemini (default), openai, or claude.
+# Each repo sets its own PROVIDER + matching secret; see llm_providers.py.
+PROVIDER = os.environ.get("PROVIDER", "gemini").strip().lower()
+MODEL = os.environ.get("MODEL") or DEFAULT_MODELS.get(PROVIDER, DEFAULT_MODELS["gemini"])
 PROTECTED = [p.strip() for p in os.environ.get("PROTECTED_PATHS", "").split(",") if p.strip()]
 MARKER = "<!-- carlos-pr-review -->"
 STATUS_CONTEXT = os.environ.get("STATUS_CONTEXT", "Carlos Review Gate")
@@ -324,27 +326,20 @@ def normalize_review(review):
 
 
 def ask_model(prompt, system_prompt=SYSTEM_PROMPT, attempts=2):
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    provider = get_provider(PROVIDER)
     last_err = None
     for attempt in range(1, attempts + 1):
-        resp = client.models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                response_mime_type="application/json",
-                temperature=TEMPERATURE,
-                top_p=1.0,
-                top_k=1,
-                seed=SEED + attempt - 1,   # retry with a different seed so a bad sample isn't repeated
-                max_output_tokens=32768,
-            ),
+        text, truncated = provider.generate(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            seed=SEED + attempt - 1,   # retry with a different seed so a bad sample isn't repeated
+            temperature=TEMPERATURE,
+            max_output_tokens=32768,
         )
-        finish = getattr(resp.candidates[0], "finish_reason", None) if resp.candidates else None
-        text = resp.text or ""
-        print(f"[carlos] attempt {attempt}: finish_reason={finish}, chars={len(text)}")
-        if str(finish).endswith("MAX_TOKENS"):
-            last_err = f"response truncated (MAX_TOKENS) after {len(text)} chars"
+        print(f"[carlos] attempt {attempt}: provider={PROVIDER} model={MODEL} "
+              f"truncated={truncated}, chars={len(text)}")
+        if truncated:
+            last_err = f"response truncated after {len(text)} chars"
             prompt += "\n\nYour previous answer was cut off. Be more concise: shorter strings, at most 6 items per list."
             continue
         try:
@@ -353,7 +348,7 @@ def ask_model(prompt, system_prompt=SYSTEM_PROMPT, attempts=2):
             last_err = f"{type(e).__name__}: {e}"
             print(f"[carlos] JSON parse failed: {last_err}\n--- head ---\n{text[:400]}\n--- tail ---\n{text[-400:]}")
             prompt += "\n\nYour previous answer was not valid JSON. Return ONLY one valid JSON object."
-    raise RuntimeError(f"Carlos could not get a valid review from {MODEL}: {last_err}")
+    raise RuntimeError(f"Carlos could not get a valid review from {PROVIDER}/{MODEL}: {last_err}")
 
 
 # ---------- policy ----------
@@ -514,7 +509,7 @@ def render(review, policy, approvals):
     L.append(f"\n_{review.get('score_justification','')}_")
     L.append("\n<sub>Policy: ≥95 auto-merge · 50–94 one approver · <50 two approvers. "
              f"Commands: `{BOT_NAME} review` · `{BOT_NAME} merge`. "
-             "Carlos Code Reviewer · powered by Gemini.</sub>")
+             f"Carlos Code Reviewer · powered by {PROVIDER}.</sub>")
     return "\n".join(L)
 
 

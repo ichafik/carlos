@@ -98,9 +98,17 @@ repo with a free plan the status check still posts, but nothing enforces it.
 Commit both files to `main` — `issue_comment` and `pull_request_review` workflows only run from
 the default branch. The workflow **must** live in `.github/workflows/`, not `.github/`.
 
-### 3. Secret
-Settings → Secrets and variables → Actions → New repository secret
-`GEMINI_API_KEY` = key from Google AI Studio.
+### 3. Pick a provider and add its secret
+Carlos is bring-your-own-key: pick **one** provider in `pr-review.yml`'s `PROVIDER` env
+(`gemini`, `openai`, or `claude`) and add the matching secret under
+Settings → Secrets and variables → Actions → New repository secret. The other two secrets
+can be left unset.
+
+| `PROVIDER` | Secret to add      | Key source                                      |
+|------------|---------------------|--------------------------------------------------|
+| `gemini`   | `GEMINI_API_KEY`    | Google AI Studio                                  |
+| `openai`   | `OPENAI_API_KEY`    | platform.openai.com                               |
+| `claude`   | `ANTHROPIC_API_KEY` | console.anthropic.com                             |
 
 ### 4. Actions permissions
 Settings → Actions → General → Workflow permissions:
@@ -126,7 +134,8 @@ settings with required approvals set to 0.
 
 | Variable          | Default                                                 | Purpose |
 |-------------------|---------------------------------------------------------|---------|
-| `MODEL`           | `gemini-3.8-flash`                                      | Gemini model id |
+| `PROVIDER`        | `gemini`                                                | Which LLM/BYO key to use: `gemini`, `openai`, or `claude` (see `.github/scripts/llm_providers.py`) |
+| `MODEL`           | provider's default (`gemini-3.8-flash` / `gpt-4.1` / `claude-sonnet-4-5`) | Model id; uncomment `MODEL` in the workflow to override |
 | `BOT_NAME`        | `carlos`                                                | Trigger word for comment commands (also update the `startsWith` filter in the job `if`) |
 | `STATUS_CONTEXT`  | `Carlos Review Gate`                                    | Name of the commit status; must match the required check in branch protection |
 | `WHITEBOOK_REPO`  | *(empty)*                                               | `owner/repo` holding the central whitebook, e.g. `my-org/.github` |
@@ -145,9 +154,12 @@ settings with required approvals set to 0.
 | `pull_request_review` | No model call. Reads the stored score from the report comment, recounts approvals, republishes the gate status so approvals flip it immediately. |
 | `issue_comment`       | Parses `carlos <command>`, checks the commenter's permission, then re-reviews or merges. The merge pins the head SHA, so a push between comment and merge is rejected. |
 
-Consistency: the call uses a fixed `seed`, `temperature=0`, `top_k=1`, and a byte-stable prompt
-(sorted file list, no volatile fields), so re-running on an unchanged diff normally reproduces the
-same score. Google treats `seed` as best-effort, so occasional small variations are still possible.
+Consistency: the call uses a fixed `seed`, `temperature=0`, `top_k=1` (Gemini) or the closest
+equivalent for the chosen provider, and a byte-stable prompt (sorted file list, no volatile
+fields), so re-running on an unchanged diff normally reproduces the same score. `seed` is
+best-effort on Gemini and OpenAI, and unsupported entirely on Claude (Carlos logs a one-time
+note and falls back to `temperature=0` only), so expect slightly more run-to-run variation with
+`PROVIDER=claude`.
 Model robustness: 32k output-token budget, truncation detection with one retry, tolerant JSON
 parsing (`json-repair`) with one retry, raw head/tail logged on failure. Any unhandled error
 sets the status to `error` so the PR is never left on a stale `pending`.

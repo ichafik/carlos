@@ -1,0 +1,10 @@
+# Carlos review script dependencies.
+# All three LLM SDKs are installed regardless of which PROVIDER a repo picks —
+# they're small, and it keeps the workflow's install step provider-agnostic.
+# Only the SDK matching PROVIDER is ever imported/called at runtime
+# (see llm_providers.py), so an unused provider's package just sits idle.
+requests==2.32.3
+json-repair==0.30.3
+google-genai==0.7.0
+openai==1.54.4
+anthropic==0.39.0

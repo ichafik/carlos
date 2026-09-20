@@ -82,12 +82,17 @@ jobs:
           python-version: "3.12"
 
       - name: Install deps
-        run: pip install google-genai requests json-repair
+        run: pip install -r .github/scripts/requirements.txt
 
       - name: Run review / gate / command
         id: carlos
         env:
+          # Pick ONE provider and set the matching secret below; the other two
+          # keys can stay empty. See .github/scripts/llm_providers.py.
+          PROVIDER: gemini   # gemini | openai | claude
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
@@ -98,7 +103,9 @@ jobs:
           COMMENT_ID: ${{ github.event.comment.id }}
           BOT_NAME: carlos
           STATUS_CONTEXT: Carlos Review Gate   # name of the required status check in branch protection
-          MODEL: gemini-3.8-flash   # e.g. gemini-3.8-flash, gemini-2.5-pro
+          # MODEL: leave unset to use the PROVIDER's default (see DEFAULT_MODELS in
+          # llm_providers.py); uncomment to override, e.g. gpt-4.1, claude-sonnet-4-5.
+          # MODEL: ""
           TESTS_RESULT: ${{ needs.tests.result }}   # success | skipped – available to the review script
           # Paths that always require at least one human approver, even at 95%+
           PROTECTED_PATHS: "auth/,payments/,migrations/,infra/,.github/workflows/"
