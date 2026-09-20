@@ -16,8 +16,7 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-APP_DIR = os.path.join(ROOT, "app")
-sys.path.insert(0, APP_DIR)
+sys.path.insert(0, ROOT)
 
 
 def _install_fakes():
@@ -52,9 +51,7 @@ def _install_fakes():
 
 _install_fakes()
 
-import config  # noqa: E402
-import key_store  # noqa: E402
-import review_engine  # noqa: E402
+from app import config, key_store, review_engine  # noqa: E402
 
 
 class FakeGitHubClient:
@@ -63,16 +60,25 @@ class FakeGitHubClient:
 
     def __init__(self, *a, **kw):
         self.calls = []
-        self.sha = "deadbeef"
+        # Starts empty, matching the real GitHubClient — a fake that
+        # pre-populates this masks exactly the bug this class exists to
+        # catch: set_status() called before get_pr() resolves the sha.
+        self.sha = ""
         self._pr = {"title": "Add feature", "body": "why", "user": {"login": "author"},
                     "head": {"sha": "deadbeef"}}
         self._comment = None
 
     def set_status(self, context, state, description):
+        if not self.sha:
+            raise AssertionError(
+                "set_status() called before get_pr() resolved self.sha — "
+                "this would 404 against the real GitHub API"
+            )
         self.calls.append(("set_status", state, description))
 
     def get_pr(self):
         self.calls.append(("get_pr",))
+        self.sha = self._pr["head"]["sha"]
         return self._pr
 
     def get_diff(self):
@@ -136,7 +142,7 @@ class RunReviewTests(unittest.TestCase):
 
     def test_run_review_without_configured_key_reports_and_raises(self):
         fake_client = FakeGitHubClient()
-        with mock.patch("review_engine._client", return_value=fake_client):
+        with mock.patch("app.review_engine._client", return_value=fake_client):
             with self.assertRaises(review_engine.NotConfigured):
                 review_engine.run_review(installation_id=1, repo_full_name="acme/widgets", pr_number=5)
         states = [c for c in fake_client.calls if c[0] == "set_status"]
@@ -146,14 +152,18 @@ class RunReviewTests(unittest.TestCase):
     def test_run_review_happy_path_posts_comment_and_success_status(self):
         key_store.set_key(1, "claude", "sk-test")
         fake_client = FakeGitHubClient()
-        with mock.patch("review_engine._client", return_value=fake_client), \
-             mock.patch("review_engine.get_provider", return_value=FakeProvider(PERFECT_REVIEW_JSON)):
+        with mock.patch("app.review_engine._client", return_value=fake_client), \
+             mock.patch("app.review_engine.get_provider", return_value=FakeProvider(PERFECT_REVIEW_JSON)):
             policy = review_engine.run_review(installation_id=1, repo_full_name="acme/widgets", pr_number=5)
 
         self.assertEqual(policy["score"], 100)
         self.assertTrue(policy["auto_merge"])
         call_names = [c[0] for c in fake_client.calls]
-        self.assertEqual(call_names[0], "set_status")
+        # get_pr() must resolve the sha before the first set_status() call
+        # (see FakeGitHubClient.set_status) — this is the ordering the
+        # blocker Carlos caught was violating.
+        self.assertEqual(call_names[0], "get_pr")
+        self.assertEqual(call_names[1], "set_status")
         self.assertIn("upsert_comment", call_names)
         self.assertIn("set_labels", call_names)
         # pending, then a final success/failure status
@@ -176,8 +186,8 @@ class RunReviewTests(unittest.TestCase):
 
         provider = mock.Mock()
         provider.generate.side_effect = fake_generate
-        with mock.patch("review_engine._client", return_value=fake_client), \
-             mock.patch("review_engine.get_provider", return_value=provider):
+        with mock.patch("app.review_engine._client", return_value=fake_client), \
+             mock.patch("app.review_engine.get_provider", return_value=provider):
             policy = review_engine.run_review(installation_id=2, repo_full_name="acme/widgets", pr_number=9)
         self.assertEqual(policy["score"], 100)
         self.assertEqual(calls["n"], 2)
@@ -199,7 +209,7 @@ class RunCommandTests(unittest.TestCase):
 
     def test_non_bot_prefixed_comment_is_ignored(self):
         fake_client = FakeGitHubClient()
-        with mock.patch("review_engine._client", return_value=fake_client):
+        with mock.patch("app.review_engine._client", return_value=fake_client):
             review_engine.run_command(1, "acme/widgets", 5, "just chatting", "someone", 111)
         self.assertEqual(fake_client.calls, [])
 
@@ -207,7 +217,7 @@ class RunCommandTests(unittest.TestCase):
         fake_client = FakeGitHubClient()
         fake_client.user_can_write = lambda login: False
         fake_client.react = lambda comment_id, content: fake_client.calls.append(("react", content))
-        with mock.patch("review_engine._client", return_value=fake_client):
+        with mock.patch("app.review_engine._client", return_value=fake_client):
             review_engine.run_command(1, "acme/widgets", 5, "carlos review", "outsider", 111)
         self.assertIn(("react", "confused"), fake_client.calls)
         self.assertTrue(any(c[0] == "reply" and "write access" in c[1] for c in fake_client.calls))

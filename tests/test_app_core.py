@@ -15,8 +15,7 @@ import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-APP_DIR = os.path.join(ROOT, "app")
-sys.path.insert(0, APP_DIR)
+sys.path.insert(0, ROOT)
 
 
 def _install_fake_cryptography():
@@ -67,9 +66,7 @@ def _install_fake_jwt():
 _install_fake_cryptography()
 _install_fake_jwt()
 
-import config  # noqa: E402
-import github_auth  # noqa: E402
-import key_store  # noqa: E402
+from app import config, github_auth, key_store  # noqa: E402
 
 
 def _set_required_env(db_path: str):
@@ -171,7 +168,7 @@ class GithubAuthTests(unittest.TestCase):
         fake_response = mock.Mock()
         fake_response.json.return_value = {"token": "ghs_abc123", "expires_at": future}
         fake_response.raise_for_status.return_value = None
-        with mock.patch("github_auth.requests.post", return_value=fake_response) as post:
+        with mock.patch("app.github_auth.requests.post", return_value=fake_response) as post:
             t1 = github_auth.get_installation_token(99)
             t2 = github_auth.get_installation_token(99)  # should hit cache, not POST again
         self.assertEqual(t1, "ghs_abc123")
@@ -183,7 +180,7 @@ class GithubAuthTests(unittest.TestCase):
         fake_response = mock.Mock()
         fake_response.json.return_value = {"token": "ghs_new", "expires_at": future}
         fake_response.raise_for_status.return_value = None
-        with mock.patch("github_auth.requests.post", return_value=fake_response) as post:
+        with mock.patch("app.github_auth.requests.post", return_value=fake_response) as post:
             github_auth.get_installation_token(100)
             github_auth.get_installation_token(100, force_refresh=True)
         self.assertEqual(post.call_count, 2)

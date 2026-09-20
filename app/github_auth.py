@@ -16,7 +16,7 @@ import time
 import jwt  # PyJWT
 import requests
 
-from config import get_settings
+from .config import get_settings
 
 GH = "https://api.github.com"
 # Installation tokens are valid for 60 minutes; refresh a bit early so a

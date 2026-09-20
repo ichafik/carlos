@@ -11,6 +11,7 @@ The actual scoring/parsing/rendering logic is imported from review_core.py
 so it can't drift from what the Actions script does.
 """
 
+import logging
 import os
 import re
 import sys
@@ -20,10 +21,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 from llm_providers import DEFAULT_MODELS, canonical_provider_name, get_provider  # noqa: E402
 from review_core import MARKER, apply_policy, build_system_prompt, normalize_review, parse_review, render  # noqa: E402
 
-import key_store
-from config import get_settings
-from github_auth import get_installation_token
-from github_client import GitHubClient
+from . import key_store
+from .config import get_settings
+from .github_auth import get_installation_token
+from .github_client import GitHubClient
+
+logger = logging.getLogger("carlos.app")
 
 MAX_WHITEBOOK_CHARS = 40_000
 SEED = 42
@@ -82,8 +85,8 @@ def _ask_model(provider, provider_name, model, prompt, system_prompt, attempts=2
             temperature=TEMPERATURE,
             max_output_tokens=32768,
         )
-        print(f"[carlos-app] attempt {attempt}: provider={provider_name} model={model} "
-              f"truncated={truncated}, chars={len(text)}")
+        logger.info("attempt %d: provider=%s model=%s truncated=%s chars=%d",
+                    attempt, provider_name, model, truncated, len(text))
         if truncated:
             last_err = f"response truncated after {len(text)} chars"
             prompt += "\n\nYour previous answer was cut off. Be more concise: shorter strings, at most 6 items per list."
@@ -101,6 +104,12 @@ def run_review(installation_id: int, repo_full_name: str, pr_number: int) -> dic
     publish the gate status. Returns the policy dict for the caller to log."""
     settings = get_settings()
     client = _client(installation_id, repo_full_name, pr_number)
+    # get_pr() must run before any set_status() call: GitHubClient starts
+    # with sha="" until get_pr() resolves it, and POSTing a commit status to
+    # /repos/{repo}/statuses/ with an empty SHA is rejected by GitHub's API
+    # (this was shipped broken once already — see the regression test
+    # test_run_review_sets_status_only_after_resolving_sha).
+    pr = client.get_pr()
     client.set_status(settings.status_context, "pending", "Carlos is reviewing…")
 
     try:
@@ -113,7 +122,6 @@ def run_review(installation_id: int, repo_full_name: str, pr_number: int) -> dic
         )
         raise
 
-    pr = client.get_pr()
     diff = client.get_diff()
     truncated = len(diff) > settings.max_diff_chars
     if truncated:

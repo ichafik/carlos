@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from config import get_settings
+from .config import get_settings
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS installation_keys (
